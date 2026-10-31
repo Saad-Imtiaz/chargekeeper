@@ -1,0 +1,685 @@
+"""Battery discovery and charge-control backends.
+
+Everything here that only reads sysfs is safe to call as a normal user (GUI,
+CLI). The write paths are reached only through chargekeeper-helper, which
+runs as root via pkexec or the systemd service.
+"""
+
+import csv
+import glob
+import json
+import os
+import time
+
+POWER_SUPPLY = "/sys/class/power_supply"
+CONFIG_PATH = "/etc/chargekeeper/config.json"
+DATA_DIR = "/var/lib/chargekeeper"
+HISTORY_PATH = DATA_DIR + "/history.csv"
+HEALTH_PATH = DATA_DIR + "/health.csv"
+STATE_PATH = "/run/chargekeeper/state.json"
+
+ACER_DRIVER = "/sys/bus/wmi/drivers/acer-wmi-battery"
+ACER_WMI_DEVICE = "/sys/bus/wmi/devices/79772EC5-04B1-4BFD-843C-61E7F77B6CC9"
+PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
+CPUFREQ = "/sys/devices/system/cpu/cpufreq"
+
+END_NAMES = ("charge_control_end_threshold", "charge_stop_threshold")
+START_NAMES = ("charge_control_start_threshold", "charge_start_threshold")
+
+DEFAULT_CONFIG = {
+    "limit_enabled": True,
+    "end": 85,
+    "start": 80,
+    "top_up": False,
+    "behaviour": "auto",
+    "charge_type": None,
+    "calibrating": False,
+}
+
+HISTORY_KEEP_LINES = 14 * 24 * 60
+
+
+# --- sysfs helpers ---------------------------------------------------------
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def read_int(path, default=None):
+    try:
+        return int(read(path))
+    except (TypeError, ValueError):
+        return default
+
+
+def write(path, value):
+    with open(path, "w") as f:
+        f.write(f"{value}\n")
+
+
+def parse_choices(text):
+    """'auto [inhibit-charge] force-discharge' -> (choices, current)."""
+    choices, current = [], None
+    for token in (text or "").split():
+        if token.startswith("[") and token.endswith("]"):
+            token = token[1:-1]
+            current = token
+        choices.append(token)
+    return choices, current
+
+
+def _attr(bat, names):
+    for name in names:
+        path = f"{bat}/{name}"
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def dmi(field):
+    return read(f"/sys/class/dmi/id/{field}", "")
+
+
+# --- batteries and adapters ------------------------------------------------
+
+def batteries():
+    """System batteries (not mice, headsets and other device batteries)."""
+    return [
+        path for path in sorted(glob.glob(POWER_SUPPLY + "/*"))
+        if read(path + "/type") == "Battery" and read(path + "/scope") != "Device"
+    ]
+
+
+def ac_online():
+    """True/False when an adapter reports its state, None when none does."""
+    state = None
+    for path in glob.glob(POWER_SUPPLY + "/*"):
+        if read(path + "/scope") == "Device":
+            continue
+        if read(path + "/type") not in ("Mains", "USB", "USB_C", "USB_PD"):
+            continue
+        online = read_int(path + "/online")
+        if online is not None:
+            state = bool(state) or online == 1
+    return state
+
+
+def battery_temperature(bat):
+    tenths = read_int(bat + "/temp")
+    if tenths is not None:
+        return tenths / 10
+    for path in glob.glob(bat + "/hwmon*/temp1_input"):
+        milli = read_int(path)
+        if milli is not None:
+            return milli / 1000
+    milli = read_int(ACER_DRIVER + "/temperature")
+    if milli is not None and -20000 < milli < 100000:
+        return milli / 1000
+    return None
+
+
+def battery_info(bat):
+    def num(name):
+        value = read_int(f"{bat}/{name}")
+        return None if value is None else value / 1e6
+
+    voltage = num("voltage_now")
+    v_design = num("voltage_min_design") or voltage
+    current = num("current_now")
+    power = num("power_now")
+    if power is None and voltage is not None and current is not None:
+        power = voltage * current
+    if power is not None:
+        power = abs(power)
+
+    if os.path.exists(bat + "/energy_full"):
+        now, full, design = num("energy_now"), num("energy_full"), num("energy_full_design")
+    else:
+        def wh(value):
+            return None if value is None or v_design is None else value * v_design
+        now, full, design = wh(num("charge_now")), wh(num("charge_full")), wh(num("charge_full_design"))
+
+    status = read(bat + "/status", "Unknown")
+    capacity = read_int(bat + "/capacity")
+    if capacity is None and now and full:
+        capacity = round(100 * now / full)
+
+    return {
+        "name": os.path.basename(bat),
+        "status": status,
+        "capacity": capacity,
+        "power": power,
+        "voltage": voltage,
+        "voltage_design": v_design,
+        "energy_now": now,
+        "energy_full": full,
+        "energy_design": design,
+        "health": 100 * full / design if full and design else None,
+        "cycle_count": read_int(bat + "/cycle_count"),
+        "technology": read(bat + "/technology"),
+        "manufacturer": (read(bat + "/manufacturer") or "").strip() or None,
+        "model": read(bat + "/model_name"),
+        "temperature": battery_temperature(bat),
+    }
+
+
+def combined_info():
+    """One summary over all system batteries (dual-battery ThinkPads)."""
+    infos = [battery_info(b) for b in batteries()]
+    if not infos:
+        return None
+    if len(infos) == 1:
+        info = infos[0]
+    else:
+        info = dict(infos[0])
+        for key in ("energy_now", "energy_full", "energy_design", "power"):
+            values = [i[key] for i in infos if i[key] is not None]
+            info[key] = sum(values) if values else None
+        if info["energy_now"] and info["energy_full"]:
+            info["capacity"] = round(100 * info["energy_now"] / info["energy_full"])
+        if info["energy_full"] and info["energy_design"]:
+            info["health"] = 100 * info["energy_full"] / info["energy_design"]
+        statuses = {i["status"] for i in infos}
+        for status in ("Charging", "Discharging"):
+            if status in statuses:
+                info["status"] = status
+                break
+        info["name"] = " + ".join(i["name"] for i in infos)
+    info["ac"] = ac_online()
+    info["batteries"] = infos
+    return info
+
+
+def time_remaining(info, limit=100):
+    """Hours until empty (discharging) or until the target (charging)."""
+    power = info.get("power")
+    now = info.get("energy_now")
+    full = info.get("energy_full")
+    if not power or power < 0.3 or now is None:
+        return None
+    if info["status"] == "Discharging":
+        return now / power
+    if info["status"] == "Charging" and full:
+        target = full * min(limit, 100) / 100
+        return max(target - now, 0) / power
+    return None
+
+
+# --- charge-control backends -----------------------------------------------
+
+class Backend:
+    """No charge control available."""
+
+    id = "none"
+    name = "No charge control found"
+    detail = "The firmware does not expose a charge limit to Linux."
+    continuous = False      # any end value from min_end to 100
+    min_end = 50
+    steps = (100,)          # allowed end values when not continuous
+    supports_start = False
+    software = False        # limit enforced by the daemon, not by firmware
+    calibration = False
+
+    def __init__(self, bats):
+        self.bats = bats
+        self.control = [b for b in bats if os.path.exists(b + "/charge_behaviour")]
+        self.typed = [b for b in bats if os.path.exists(b + "/charge_types")]
+
+    @property
+    def available(self):
+        return self.id != "none"
+
+    def snap(self, end):
+        end = max(self.min_end, min(100, int(end)))
+        if self.continuous:
+            return end
+        lower = [s for s in self.steps if s <= end]
+        return max(lower) if lower else min(self.steps)
+
+    def limit(self):
+        return None
+
+    def start(self):
+        return None
+
+    def ensure(self, end, start):
+        """Make the firmware match end/start, writing only on mismatch."""
+
+    def behaviours(self):
+        return parse_choices(read(self.control[0] + "/charge_behaviour"))[0] if self.control else []
+
+    def behaviour(self):
+        return parse_choices(read(self.control[0] + "/charge_behaviour"))[1] if self.control else None
+
+    def set_behaviour(self, value):
+        for bat in self.control:
+            if parse_choices(read(bat + "/charge_behaviour"))[1] != value:
+                write(bat + "/charge_behaviour", value)
+
+    def charge_types(self):
+        return parse_choices(read(self.typed[0] + "/charge_types"))[0] if self.typed else []
+
+    def charge_type(self):
+        return parse_choices(read(self.typed[0] + "/charge_types"))[1] if self.typed else None
+
+    def set_charge_type(self, value):
+        for bat in self.typed:
+            if parse_choices(read(bat + "/charge_types"))[1] != value:
+                write(bat + "/charge_types", value)
+
+    def calibrating(self):
+        return False
+
+    def set_calibration(self, on):
+        raise OSError("Calibration is not supported on this laptop")
+
+    def describe(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "detail": self.detail,
+            "continuous": self.continuous,
+            "min_end": self.min_end,
+            "steps": list(self.steps),
+            "supports_start": self.supports_start,
+            "software": self.software,
+            "calibration": self.calibration,
+            "behaviours": self.behaviours(),
+            "charge_types": self.charge_types(),
+        }
+
+
+class ThresholdBackend(Backend):
+    """Standard kernel thresholds: ThinkPad, ASUS, Dell, Framework, MSI, Huawei, LG, ..."""
+
+    id = "thresholds"
+    continuous = True
+    min_end = 20
+
+    def __init__(self, bats, threshold_bats):
+        super().__init__(bats)
+        self.threshold_bats = threshold_bats
+        self.supports_start = any(_attr(b, START_NAMES) for b in threshold_bats)
+        vendor = dmi("sys_vendor") or "Laptop"
+        self.name = f"{vendor} firmware charge thresholds"
+        self.detail = ("Start and stop thresholds are set in firmware." if self.supports_start
+                       else "The stop threshold is set in firmware.")
+
+    def limit(self):
+        return read_int(_attr(self.threshold_bats[0], END_NAMES))
+
+    def start(self):
+        path = _attr(self.threshold_bats[0], START_NAMES)
+        return read_int(path) if path else None
+
+    def ensure(self, end, start):
+        for bat in self.threshold_bats:
+            end_path = _attr(bat, END_NAMES)
+            start_path = _attr(bat, START_NAMES)
+            current_end = read_int(end_path, 100)
+            current_start = read_int(start_path) if start_path else None
+
+            if start_path is None:
+                if current_end != end:
+                    write(end_path, end)
+                continue
+
+            if start is None:
+                # Limit off: charging must resume whenever below full.
+                if current_end != end:
+                    write(end_path, end)
+                if current_start is not None and current_start > 50:
+                    self._write_low_start(start_path)
+                continue
+
+            if current_end == end and current_start == start:
+                continue
+            # The kernel rejects start >= end, so order the writes.
+            if start >= current_end:
+                write(end_path, end)
+                write(start_path, start)
+            else:
+                write(start_path, start)
+                write(end_path, end)
+
+    @staticmethod
+    def _write_low_start(path):
+        # ThinkPad accepts 0; Dell's minimum is 50.
+        for value in (0, 50):
+            try:
+                write(path, value)
+                return
+            except OSError:
+                continue
+
+
+class FixedLimitBackend(Backend):
+    """An on/off firmware switch with one fixed limit."""
+
+    path = None
+    on_value = "1"
+    off_value = "0"
+    fixed = 80
+
+    @property
+    def steps(self):
+        return (self.fixed, 100)
+
+    @property
+    def min_end(self):
+        return self.fixed
+
+    def limit(self):
+        return self.fixed if read(self.path) == self.on_value else 100
+
+    def ensure(self, end, start):
+        want = self.on_value if end < 100 else self.off_value
+        if read(self.path) != want:
+            write(self.path, want)
+
+
+class AcerBackend(FixedLimitBackend):
+    id = "acer"
+    name = "Acer battery health mode"
+    detail = "Acer firmware supports a single fixed 80% limit and battery calibration."
+    path = ACER_DRIVER + "/health_mode"
+    calibration = True
+
+    def calibrating(self):
+        return read(ACER_DRIVER + "/calibration_mode") == "1"
+
+    def set_calibration(self, on):
+        write(ACER_DRIVER + "/calibration_mode", 1 if on else 0)
+
+
+class IdeapadBackend(FixedLimitBackend):
+    id = "ideapad"
+    name = "Lenovo conservation mode"
+    detail = "Lenovo firmware holds the charge at a fixed level (80% on newer models, 60% on older ones)."
+
+    def __init__(self, bats, path):
+        super().__init__(bats)
+        self.path = path
+
+
+class SamsungBackend(FixedLimitBackend):
+    id = "samsung"
+    name = "Samsung battery life extender"
+    detail = "Samsung firmware supports a single fixed 80% limit."
+    path = "/sys/devices/platform/samsung/battery_life_extender"
+
+
+class SonyBackend(Backend):
+    id = "sony"
+    name = "Sony battery care limiter"
+    detail = "Sony firmware supports 50%, 80% and 100%."
+    path = "/sys/devices/platform/sony-laptop/battery_care_limiter"
+    steps = (50, 80, 100)
+
+    def limit(self):
+        value = read_int(self.path, 0)
+        return 100 if value == 0 else value
+
+    def ensure(self, end, start):
+        want = 0 if end >= 100 else end
+        if read_int(self.path) != want:
+            write(self.path, want)
+
+
+class SoftwareBackend(Backend):
+    """No firmware threshold, but charging can be paused: the daemon enforces the limit."""
+
+    id = "software"
+    name = "Software charge limit"
+    detail = "The daemon pauses charging at the limit and resumes at the start level."
+    continuous = True
+    supports_start = True
+    software = True
+
+    def limit(self):
+        return load_config().get("end")
+
+    def start(self):
+        return load_config().get("start")
+
+
+def detect():
+    bats = batteries()
+    with_thresholds = [b for b in bats if _attr(b, END_NAMES)]
+    if with_thresholds:
+        return ThresholdBackend(bats, with_thresholds)
+    if read(ACER_DRIVER + "/health_mode") in ("0", "1"):
+        return AcerBackend(bats)
+    for path in glob.glob("/sys/bus/platform/drivers/ideapad_acpi/*/conservation_mode"):
+        return IdeapadBackend(bats, path)
+    if os.path.exists(SamsungBackend.path):
+        return SamsungBackend(bats)
+    if os.path.exists(SonyBackend.path):
+        return SonyBackend(bats)
+    for bat in bats:
+        if "inhibit-charge" in parse_choices(read(bat + "/charge_behaviour"))[0]:
+            return SoftwareBackend(bats)
+    return Backend(bats)
+
+
+def hints():
+    """Fixable reasons why charge control is missing or may misbehave."""
+    out = []
+    if os.path.exists(ACER_WMI_DEVICE) and not os.path.isdir(ACER_DRIVER):
+        out.append({
+            "id": "acer-driver",
+            "title": "Acer battery driver not installed",
+            "body": "This Acer laptop has the battery health interface, but Linux needs the "
+                    "acer-wmi-battery driver to use it. Run the installer again with --acer "
+                    "to build and load it.",
+        })
+    tlp_files = ["/etc/tlp.conf"] + sorted(glob.glob("/etc/tlp.d/*.conf"))
+    for path in tlp_files:
+        text = read(path, "")
+        if any(line.strip().startswith(("START_CHARGE_THRESH", "STOP_CHARGE_THRESH"))
+               for line in text.splitlines()):
+            out.append({
+                "id": "tlp-thresholds",
+                "title": "TLP also sets charge thresholds",
+                "body": f"{path} sets START/STOP_CHARGE_THRESH and will fight with Chargekeeper. "
+                        "Comment those lines out.",
+            })
+            break
+    return out
+
+
+# --- configuration and policy ----------------------------------------------
+
+def load_config():
+    config = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG_PATH) as f:
+            stored = json.load(f)
+        config.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
+    except (OSError, ValueError):
+        pass
+    return config
+
+
+def save_config(config):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(config, f, indent=2)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, CONFIG_PATH)
+
+
+def target(config, backend):
+    """(end, start) the firmware should hold, or None to leave it alone."""
+    if config["calibrating"]:
+        return None
+    if not config["limit_enabled"] or config["top_up"]:
+        return 100, None
+    end = backend.snap(config["end"])
+    if end >= 100:
+        return 100, None
+    start = config.get("start")
+    if start is None or start >= end:
+        start = max(end - 5, 0)
+    return end, start
+
+
+def apply(backend, config):
+    if not backend.available:
+        return
+    wanted = target(config, backend)
+    if wanted and not backend.software:
+        backend.ensure(*wanted)
+    if not backend.software and config["behaviour"] in backend.behaviours():
+        if backend.behaviour() != config["behaviour"]:
+            backend.set_behaviour(config["behaviour"])
+    if config["charge_type"] and config["charge_type"] in backend.charge_types():
+        if backend.charge_type() != config["charge_type"]:
+            backend.set_charge_type(config["charge_type"])
+
+
+def enforce_software(backend, config, capacity):
+    """Pause charging at the limit and resume below the start level."""
+    if capacity is None:
+        return
+    if config["behaviour"] == "force-discharge":
+        backend.set_behaviour("force-discharge")
+        return
+    wanted = target(config, backend)
+    if wanted is None or wanted[0] >= 100:
+        backend.set_behaviour("auto")
+    elif capacity >= wanted[0]:
+        backend.set_behaviour("inhibit-charge")
+    elif capacity <= wanted[1]:
+        backend.set_behaviour("auto")
+
+
+# --- history ---------------------------------------------------------------
+
+def log_sample(info):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    row = [
+        int(time.time()),
+        info["capacity"] if info["capacity"] is not None else "",
+        f"{info['power']:.2f}" if info["power"] is not None else "",
+        info["status"],
+        "" if info["ac"] is None else int(info["ac"]),
+        f"{info['temperature']:.1f}" if info["temperature"] is not None else "",
+    ]
+    with open(HISTORY_PATH, "a") as f:
+        f.write(",".join(str(v) for v in row) + "\n")
+    if os.path.getsize(HISTORY_PATH) > 1_500_000:
+        with open(HISTORY_PATH) as f:
+            lines = f.readlines()[-HISTORY_KEEP_LINES:]
+        with open(HISTORY_PATH, "w") as f:
+            f.writelines(lines)
+
+    today = time.strftime("%Y-%m-%d")
+    last = None
+    try:
+        with open(HEALTH_PATH) as f:
+            for last in f:
+                pass
+    except OSError:
+        pass
+    if (last is None or not last.startswith(today)) and info["energy_full"]:
+        with open(HEALTH_PATH, "a") as f:
+            f.write(f"{today},{info['energy_full']:.2f},{info['energy_design'] or 0:.2f},"
+                    f"{info['cycle_count'] if info['cycle_count'] is not None else ''}\n")
+
+
+def load_history(since):
+    points = []
+    try:
+        with open(HISTORY_PATH) as f:
+            for row in csv.reader(f):
+                if len(row) < 6 or int(row[0]) < since:
+                    continue
+                points.append({
+                    "t": int(row[0]),
+                    "capacity": int(row[1]) if row[1] else None,
+                    "power": float(row[2]) if row[2] else None,
+                    "status": row[3],
+                    "ac": row[4] == "1",
+                    "temperature": float(row[5]) if row[5] else None,
+                })
+    except (OSError, ValueError):
+        pass
+    return points
+
+
+def load_health():
+    rows = []
+    try:
+        with open(HEALTH_PATH) as f:
+            for row in csv.reader(f):
+                full, design = float(row[1]), float(row[2])
+                rows.append({
+                    "t": time.mktime(time.strptime(row[0], "%Y-%m-%d")),
+                    "full": full,
+                    "health": 100 * full / design if design else None,
+                    "cycles": int(row[3]) if row[3] else None,
+                })
+    except (OSError, ValueError, IndexError):
+        pass
+    return rows
+
+
+def daemon_state():
+    try:
+        with open(STATE_PATH) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    state["alive"] = time.time() - state.get("updated", 0) < 60
+    return state
+
+
+# --- power tuning ----------------------------------------------------------
+
+def platform_profiles():
+    choices = read(PLATFORM_PROFILE + "_choices")
+    return (choices.split(), read(PLATFORM_PROFILE)) if choices else ([], None)
+
+
+def epp_choices():
+    policy = CPUFREQ + "/policy0"
+    choices = read(policy + "/energy_performance_available_preferences")
+    if not choices:
+        return [], None
+    return choices.split(), read(policy + "/energy_performance_preference")
+
+
+def set_epp(value):
+    for path in glob.glob(CPUFREQ + "/policy*/energy_performance_preference"):
+        write(path, value)
+
+
+def cpu_info():
+    temp = None
+    for hwmon in glob.glob("/sys/class/hwmon/hwmon*"):
+        if read(hwmon + "/name") in ("coretemp", "k10temp", "zenpower"):
+            temp = read_int(hwmon + "/temp1_input")
+            if temp is not None:
+                temp /= 1000
+                break
+    return {
+        "driver": read(CPUFREQ + "/policy0/scaling_driver"),
+        "governor": read(CPUFREQ + "/policy0/scaling_governor"),
+        "temperature": temp,
+    }
+
+
+def service_active(name):
+    import subprocess
+    try:
+        result = subprocess.run(["systemctl", "is-active", name], capture_output=True,
+                                text=True, timeout=3)
+        return result.stdout.strip() == "active"
+    except (OSError, subprocess.TimeoutExpired):
+        return False

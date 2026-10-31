@@ -1,0 +1,32 @@
+#!/bin/bash
+# Remove Chargekeeper. The firmware limit is switched off first so the battery charges normally again.
+#   sudo ./uninstall.sh          keep the acer-wmi-battery driver
+#   sudo ./uninstall.sh --acer   remove the driver too
+set -uo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run with sudo: sudo $0 $*" >&2
+    exit 1
+fi
+
+/usr/lib/chargekeeper/chargekeeper-helper set --limit-enabled off 2>/dev/null
+systemctl disable --now chargekeeper.service 2>/dev/null
+rm -rf /usr/lib/chargekeeper /etc/chargekeeper /var/lib/chargekeeper /run/chargekeeper
+rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
+    /usr/lib/systemd/system-sleep/chargekeeper \
+    /usr/share/polkit-1/actions/dev.chargekeeper.Chargekeeper.policy \
+    /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop \
+    /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg
+systemctl daemon-reload
+
+if [ -n "${SUDO_USER:-}" ]; then
+    rm -f "$(getent passwd "$SUDO_USER" | cut -d: -f6)/.config/autostart/dev.chargekeeper.Chargekeeper.desktop"
+fi
+
+if [ "${1:-}" = "--acer" ]; then
+    modprobe -r acer-wmi-battery 2>/dev/null
+    dkms remove -m acer-wmi-battery -v 0.1.0 --all 2>/dev/null
+    rm -rf /usr/src/acer-wmi-battery-0.1.0 /etc/modules-load.d/acer-wmi-battery.conf
+fi
+
+echo "Chargekeeper removed. Per-user settings stay in ~/.config/chargekeeper; delete them by hand if wanted."

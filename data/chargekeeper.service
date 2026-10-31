@@ -1,0 +1,19 @@
+[Unit]
+Description=Chargekeeper battery charge limit service
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/chargekeeper/chargekeeper-helper daemon
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=chargekeeper
+RuntimeDirectoryPreserve=yes
+StateDirectory=chargekeeper
+ConfigurationDirectory=chargekeeper
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
