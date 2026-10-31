@@ -211,24 +211,32 @@ Measuring the battery shouldn't drain it. Chargekeeper keeps readings current li
 3. **Polling only while you're looking.** While the window or the tray menu is open, numbers refresh
    every 2 seconds. Otherwise there is only a 60-second check for firmware that sends no events.
    The kernel caches battery values for 1 second anyway, so faster polling would gain nothing.
-4. **Smoothed estimates.** Time remaining uses a power average that settles over about a minute
-   and restarts when you plug in or unplug, so it doesn't jump with every load spike. If the
-   firmware doesn't report power, it's calculated from the change in stored energy.
+4. **Time remaining from your recent use.** The estimate divides the stored energy by your
+   average power over the last 3 minutes, which follows a real change in what you're doing but
+   ignores short spikes. It restarts when you plug in or unplug. The 3-minute window was chosen
+   by simulating mixed use, gaming then idle, and steady work against 1- and 10-minute averages,
+   the session average and last week's typical use: it had the lowest error (14.5% on average
+   versus 16.0% for a 1-minute average; 4.3% for steady work). When your current load would give
+   a noticeably different answer, the Overview shows that too ("2 h 10 min at the current load").
+   Charging time allows for the slower charging above 80%. If the firmware doesn't report power,
+   it's calculated from the change in stored energy.
 5. **The service sleeps** until a kernel event or its next deadline: 60 s normally, 30 s during
    calibration or charge to full. On laptops where the service itself enforces the limit, it checks
    every 20 s while charging and every 5 s within 3% of the limit, so charging stops on time.
 
-Measured on an Acer Predator PH315-55 (20 threads):
+Measured over 10 minutes on an Acer Predator PH315-55 (20 threads), all running at once:
 
-| Running | CPU (share of one core) | Wakeups |
-|---|---|---|
-| Background service | 0.17 ms per check, about **0.0003%** | 1 per minute when idle |
-| Tray icon, menu closed | **0.017%** | 1 per minute |
-| Window open (live numbers every 2 s) | 0.125% | |
-| Monitor tab or tray menu open | about 1.2–1.4% | only while open |
+| Running | CPU (share of one core) | Wakeups | Memory |
+|---|---|---|---|
+| Background service | **0.017%** (0.05 s of CPU in 5 min) | 1 per minute | 11 MB |
+| Tray icon, menu closed | **0.015%** (0.09 s in 10 min) | 1 per minute | 138 MB resident, 50 MB of it its own |
+| Window open, live numbers every 2 s | 0.16% (0.94 s in 10 min) | 50 per minute | 76 MB |
+| Monitor tab or tray menu open | about 1.2–1.4% | only while open | |
 
-Memory stays flat over time: 600 tray-menu openings, 40 window reopenings and 3,000 service cycles
-were tested for leaks.
+Together the service and tray use roughly 1–2 milliwatts, around 0.002% of a typical laptop
+battery per hour. Most of the tray's memory is GTK and libadwaita, shared with other GTK apps.
+Memory stays flat over time: the 10-minute run, 600 tray-menu openings, 40 window reopenings and
+3,000 service cycles showed no growth.
 
 ## Safety and precautions
 
@@ -322,7 +330,7 @@ you want.
 ## Development
 
 ```sh
-python3 -m unittest discover tests     # 44 tests, no root needed
+python3 -m unittest discover tests     # 46 tests, no root needed
 ./bin/chargekeeper                     # runs from the source tree if not installed
 ```
 

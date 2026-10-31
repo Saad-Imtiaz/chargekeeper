@@ -184,10 +184,15 @@ def cmd_daemon(args):
 
             if info and time.time() - last_log >= LOG_SECONDS:
                 core.log_sample(info)
-                # Sample every time so the baseline stays fresh; keep it only on battery.
-                apps = sampler.sample()
-                if ac is False and last_log:
-                    core.add_usage(apps, round(time.time() - last_log))
+                # Per-app usage is only recorded on battery, so only scan /proc then: on
+                # the charger the scan was most of the service's CPU time. The first
+                # scan after unplugging is the baseline (it returns nothing).
+                if ac is False:
+                    apps = sampler.sample()
+                    if apps:
+                        core.add_usage(apps, round(time.time() - last_log))
+                else:
+                    sampler = core.CpuSampler()
                 last_log = time.time()
             last_ac = ac
         except Exception as exc:  # keep the daemon alive, surface the error in the GUI
