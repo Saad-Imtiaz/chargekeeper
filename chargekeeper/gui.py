@@ -1395,8 +1395,14 @@ class App(Adw.Application):
         self.notified[key] = time.time()
         return True
 
+    def show_page(self, name):
+        self.activate()
+        if self.window:
+            self.window.stack.set_visible_child_name(name)
+
     def _watch(self):
         if self.tray:
+            self.tray.sample()
             self.tray.update()
         info = core.combined_info()
         if not info or info["capacity"] is None:

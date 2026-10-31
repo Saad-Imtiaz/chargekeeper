@@ -9,6 +9,7 @@ import os
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango
 
 from . import core, monitor
+from .monitor import app_identity
 from .gui import AMBER, BLUE, GREEN, PURPLE, Painter
 
 INTERVAL = 2
@@ -94,41 +95,6 @@ def add_icon_path():
     here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "icons")
     if os.path.isdir(here):
         Gtk.IconTheme.get_for_display(display).add_search_path(here)
-
-
-# --- app names and icons -------------------------------------------------------
-
-_apps = {}
-
-
-def app_identity(name):
-    """(display name, Gio.Icon) for a process name, from its .desktop file when one matches."""
-    if name in _apps:
-        return _apps[name]
-    result = (name, Gio.ThemedIcon.new("application-x-executable-symbolic"))
-    if name == "Kernel":
-        result = ("Kernel", Gio.ThemedIcon.new("system-run-symbolic"))
-    else:
-        wanted = name.lower()
-        try:
-            groups = Gio.DesktopAppInfo.search(name)
-        except GLib.Error:
-            groups = []
-        for desktop_id in [i for group in groups[:3] for i in group]:
-            info = Gio.DesktopAppInfo.new(desktop_id)
-            if not info:
-                continue
-            stem = desktop_id.removesuffix(".desktop").lower()
-            candidates = {
-                os.path.basename(info.get_executable() or "").lower(),
-                (info.get_string("StartupWMClass") or "").lower(),
-                stem, stem.split("_")[-1], stem.split(".")[-1],
-            }
-            if wanted in candidates:
-                result = (info.get_display_name() or name, info.get_icon() or result[1])
-                break
-    _apps[name] = result
-    return result
 
 
 # --- widgets ---------------------------------------------------------------------

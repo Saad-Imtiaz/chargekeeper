@@ -6,10 +6,12 @@ AppIndicator extension; KDE, Cinnamon, XFCE and others support it natively.
 """
 
 import os
+import subprocess
+import time
 
 from gi.repository import Gio, GLib
 
-from . import core
+from . import core, monitor
 from .cli import fmt_hours
 
 WATCHER = "org.kde.StatusNotifierWatcher"
@@ -101,9 +103,34 @@ MENU_XML = """
 
 # Stable menu item ids. Limit radios use LIMIT_BASE + percent.
 ID_STATUS, ID_HEADER, ID_NO_LIMIT, ID_FULL, ID_OPEN, ID_QUIT = 1, 2, 3, 4, 5, 6
-ID_SEPARATORS = (90, 91, 92)
+ID_SEPARATORS = (90, 91, 92, 93)
 LIMIT_BASE = 100
+# System monitor section: each row's submenu holds its top apps at row id + 1..3.
+ID_MON_HEADER, ID_CPU, ID_MEM, ID_DISK, ID_NET, ID_TEMPS, ID_OPEN_MONITOR = 300, 310, 320, 330, 340, 350, 360
+TEMP_ICONS = {"cpu": "ck-cpu-symbolic", "battery": "battery-good-symbolic", "board": "ck-board-symbolic",
+              "storage": "drive-harddisk-solidstate-symbolic", "gpu": "video-display-symbolic"}
 
+
+def menu_text(text):
+    """dbusmenu treats '_' as a mnemonic marker."""
+    return text.replace("_", "__")
+
+
+def app_icon(name):
+    """('icon-name', str) or ('icon-data', PNG bytes) for a menu row."""
+    icon = monitor.app_identity(name)[1]
+    if isinstance(icon, Gio.ThemedIcon):
+        return "icon-name", icon.get_names()[0]
+    if isinstance(icon, Gio.FileIcon) and icon.get_file().get_path():
+        try:
+            from gi.repository import GdkPixbuf
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(icon.get_file().get_path(), 16, 16)
+            ok, data = pixbuf.save_to_bufferv("png", [], [])
+            if ok:
+                return "icon-data", bytes(data)
+        except (GLib.Error, ImportError, ValueError):
+            pass
+    return "icon-name", "application-x-executable-symbolic"
 
 def battery_icon(info):
     if not info or info["capacity"] is None:
@@ -148,6 +175,16 @@ class Tray:
         self.icon, self.label, self.tooltip = "battery-missing-symbolic", "", ""
         self.host_available = False
         self.registrations = []
+        # Readings for the System monitor section. A cheap baseline is taken on every
+        # 30 s refresh so that opening the menu can show rates since then; temperatures
+        # are only read when the menu opens (SSD sensors wake the drive).
+        self.monitor = monitor.Monitor()
+        self.stats = None
+        self.stats_time = 0
+        self.net_apps = []
+        self.temps = []
+        self.app_icons = {}
+        self.sample()
 
         item_info = Gio.DBusNodeInfo.new_for_xml(ITEM_XML).interfaces[0]
         menu_info = Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0]
@@ -189,6 +226,28 @@ class Tray:
         self.app.tray_changed()
 
     # --- state ---
+
+    def sample(self, temperatures=False):
+        if time.monotonic() - self.stats_time >= 1.5:
+            result = self.monitor.sample()
+            if self.monitor.prev and self.stats_time:
+                self.stats = result
+            self.stats_time = time.monotonic()
+            try:
+                out = subprocess.run(monitor.SS_COMMAND, capture_output=True, text=True, timeout=2).stdout
+                self.net_apps = self.monitor.network_apps(out)
+            except (OSError, subprocess.TimeoutExpired):
+                self.net_apps = []
+        if temperatures:
+            bats = core.batteries()
+            battery = core.battery_temperature(bats[0]) if bats else None
+            self.temps = monitor.highlights(monitor.sensors(), battery)
+
+    def _icon_for(self, name):
+        if name not in self.app_icons:
+            self.app_icons[name] = app_icon(name)
+        key, value = self.app_icons[name]
+        return {key: value}
 
     def update(self):
         """Re-read the battery and rebuild icon, label and menu; emit only what changed."""
@@ -256,9 +315,63 @@ class Tray:
         else:
             add(ID_HEADER, label="This laptop can't limit charging", enabled=False)
         add(ID_SEPARATORS[2], type="separator")
+        children = {0: order}
+        self._monitor_section(add, children)
+        add(ID_SEPARATORS[3], type="separator")
         add(ID_OPEN, self.app.activate, label="Open Chargekeeper")
         add(ID_QUIT, self.app.quit, label="Quit")
-        return items, {0: order}, handlers
+        # Submenu rows were added in sequence; move them under their parent.
+        for parent, kids in list(children.items()):
+            if parent:
+                for kid in kids:
+                    order.remove(kid)
+                items[parent]["children-display"] = "submenu"
+        return items, children, handlers
+
+    def _monitor_section(self, add, children):
+        """System monitor rows; each opens a submenu with the top three apps."""
+        fmt = monitor.fmt_bytes
+        add(ID_MON_HEADER, label="System monitor", enabled=False)
+        r = self.stats
+        if r is None:
+            add(ID_CPU, label="Measuring…", enabled=False)
+        else:
+            mem_pct = 100 * r["mem_used"] / (r["mem_total"] or 1)
+            rows = (
+                (ID_CPU, "ck-cpu-symbolic", f"Processor · {r['cpu_pct']:.0f}%",
+                 [(n, f"{v:.1f}%") for n, v in r["top_cpu"] if v >= 0.05]),
+                (ID_MEM, "ck-memory-symbolic", f"Memory · {fmt(r['mem_used'])} of {fmt(r['mem_total'])} ({mem_pct:.0f}%)",
+                 [(n, fmt(v)) for n, v in r["top_mem"]]),
+                (ID_DISK, "drive-harddisk-symbolic", f"Disk · {fmt(r['disk_read'] + r['disk_write'], rate=True)}",
+                 [(n, fmt(v, rate=True)) for n, v in r["top_disk"]]),
+                (ID_NET, "network-transmit-receive-symbolic",
+                 f"Network · ↓ {fmt(r['net_down'], rate=True)}  ↑ {fmt(r['net_up'], rate=True)}",
+                 [(n, fmt(v, rate=True)) for n, v in self.net_apps]),
+            )
+            for row_id, icon, label, apps in rows:
+                add(row_id, label=menu_text(label), **{"icon-name": icon})
+                kids = []
+                for i, (name, value) in enumerate(apps[:3], start=1):
+                    display = monitor.app_identity(name)[0]
+                    add(row_id + i, label=menu_text(f"{display} · {value}"), **self._icon_for(name))
+                    kids.append(row_id + i)
+                if not kids:
+                    add(row_id + 1, label="No app activity right now", enabled=False)
+                    kids.append(row_id + 1)
+                children[row_id] = kids
+        if self.temps:
+            readings = [(kind, title, value) for kind, title, value, _src in self.temps if value is not None]
+            short = " · ".join(f"{title.replace('Motherboard', 'Board')} {value:.0f}°"
+                               for kind, title, value in readings if kind in ("cpu", "battery", "board"))
+            add(ID_TEMPS, label=menu_text(f"Temperatures · {short}" if short else "Temperatures"),
+                **{"icon-name": "ck-temperature-symbolic"})
+            kids = []
+            for i, (kind, title, value, source) in enumerate(self.temps, start=1):
+                text = f"{title} · {value:.0f} °C" if value is not None else f"{title} · not reported"
+                add(ID_TEMPS + i, label=menu_text(text), **{"icon-name": TEMP_ICONS.get(kind, "ck-temperature-symbolic")})
+                kids.append(ID_TEMPS + i)
+            children[ID_TEMPS] = kids
+        add(ID_OPEN_MONITOR, lambda: self.app.show_page("monitor"), label="Open System Monitor…")
 
     # --- actions ---
 
@@ -322,7 +435,8 @@ class Tray:
             return {"children-display": GLib.Variant("s", "submenu")}
         out = {}
         for key, value in self.items.get(item_id, {}).items():
-            kind = "b" if isinstance(value, bool) else "i" if isinstance(value, int) else "s"
+            kind = ("b" if isinstance(value, bool) else "i" if isinstance(value, int)
+                    else "ay" if isinstance(value, bytes) else "s")
             out[key] = GLib.Variant(kind, value)
         return out
 
@@ -358,9 +472,13 @@ class Tray:
             invocation.return_value(GLib.Variant("(ai)", ([],)))
         elif method == "AboutToShow":
             before = self.revision
+            if args[0] == 0:
+                self.sample(temperatures=True)
             self.update()   # fresh numbers each time the menu opens
             invocation.return_value(GLib.Variant("(b)", (self.revision != before,)))
         elif method == "AboutToShowGroup":
+            if 0 in args[0]:
+                self.sample(temperatures=True)
             self.update()
             invocation.return_value(GLib.Variant("(aiai)", ([], [])))
         else:

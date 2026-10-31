@@ -45,7 +45,9 @@ the limit off first.
   the charger, and which apps used the most processor time while on battery (today or 7 days).
   The service reads `/proc` once a minute; nothing is recorded while plugged in.
 - **Tray icon**: battery level in the top bar. Click it for a menu with the current state, the
-  charge limit (60–90% or no limit), **Charge to full once**, and Open / Quit. Turn it on under
+  charge limit (60–90% or no limit), **Charge to full once**, a **System monitor** section
+  (processor, memory, disk, network and temperatures, each opening a submenu with the top three
+  apps), and Open / Quit. Turn it on under
   System → Tray icon; it starts at login. It uses the StatusNotifierItem protocol: KDE, Cinnamon,
   XFCE and others show it natively, GNOME needs the AppIndicator extension (Ubuntu ships it; the
   app offers to enable it).
