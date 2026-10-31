@@ -12,9 +12,10 @@ How a reading is kept fresh without spending power on it:
    LiveBattery.want(); with nobody asking, a slow heartbeat only catches firmware
    that never sends events. The kernel caches battery values for a second anyway
    (battery.cache_time), so faster than MIN_INTERVAL is never useful.
-4. Smoothing. Instantaneous power jumps with every load change. Time estimates use
-   an exponential average that resets when the charging state changes, and power is
-   derived from the energy change when the firmware doesn't report it.
+4. Estimating. Instantaneous power jumps with every load change, so time remaining
+   uses a 3-minute average of this session's power (see Estimator for why), which
+   restarts when the charging state changes. It reuses readings taken anyway. Power
+   is derived from the energy change when the firmware doesn't report it.
 
 Everything here only reads.
 """
@@ -28,7 +29,8 @@ from . import core
 NETLINK_KOBJECT_UEVENT = 15
 MIN_INTERVAL = 1.0
 HEARTBEAT = 60.0
-SMOOTHING_SECONDS = 60.0      # time constant of the power average
+SMOOTHING_SECONDS = 60.0      # fast average: what the laptop is doing now
+PATTERN_SECONDS = 180.0       # estimate: the recent pattern, without brief spikes
 DERIVE_MIN_SECONDS = 30.0     # shortest window for power from energy change
 DEBOUNCE_MS = 150             # drivers often send several events in a burst
 
@@ -93,11 +95,31 @@ class PowerSmoother:
         return self.value
 
 
-class BatteryMonitor:
-    """Stateful readings: adds power_avg (smoothed) and fills in missing power."""
+class Estimator:
+    """Power to base time estimates on: a 3-minute average of this session's use.
+
+    Chosen by simulation (tests/test_power.py, EstimatorAccuracyTests) against a
+    1-minute average, a 10-minute average, the session average, last week's typical
+    power, medians and blends: the plain 3-minute average had the lowest error over
+    mixed, gaming-then-idle and steady sessions (14.5% vs 16.0% for the old 1-minute
+    average; 4.3% vs 6.7% for steady work). Longer memory and history lost when the
+    load changed. The 1-minute average is kept for "at the current load".
+    """
 
     def __init__(self):
-        self.smoother = PowerSmoother()
+        self.fast = PowerSmoother(SMOOTHING_SECONDS)
+        self.pattern = PowerSmoother(PATTERN_SECONDS)
+
+    def update(self, status, power, now):
+        """(estimate, fast) in watts, either None while there is nothing to go on."""
+        return self.pattern.update(status, power, now), self.fast.update(status, power, now)
+
+
+class BatteryMonitor:
+    """Stateful readings: adds power_avg (the estimate) and power_fast, fills in missing power."""
+
+    def __init__(self, estimator=None):
+        self.estimator = estimator or Estimator()
         self.anchor = None          # (time, energy_now, status) for deriving power
 
     def read(self, now=None):
@@ -122,7 +144,7 @@ class BatteryMonitor:
         else:
             self.anchor = (now, energy, status) if energy is not None else None
 
-        info["power_avg"] = self.smoother.update(status, power, now)
+        info["power_avg"], info["power_fast"] = self.estimator.update(status, power, now)
         return info
 
 

@@ -58,9 +58,66 @@ class MonitorTests(unittest.TestCase):
 
 
 class TimeRemainingTests(unittest.TestCase):
-    def test_uses_smoothed_power(self):
+    def test_uses_estimate(self):
         info = {"status": "Discharging", "energy_now": 40.0, "energy_full": 80.0, "power": 40.0, "power_avg": 10.0}
         self.assertAlmostEqual(core.time_remaining(info), 4.0)
+        self.assertAlmostEqual(core.time_remaining(info, power=20.0), 2.0)     # "at the current load"
+
+    def test_charging_slows_above_80_percent(self):
+        info = {"status": "Charging", "energy_now": 50.0, "energy_full": 100.0, "power": 40.0}
+        # 50 -> 80 Wh at 40 W, then 80 -> 100 Wh at half the rate.
+        self.assertAlmostEqual(core.time_remaining(info), 30 / 40 + 20 / 20)
+        self.assertAlmostEqual(core.time_remaining(info, limit=80), 30 / 40)
+        tapering = dict(info, energy_now=90.0, power=10.0)          # measured rate already reflects it
+        self.assertAlmostEqual(core.time_remaining(tapering), 1.0)
+        self.assertEqual(core.time_remaining(dict(info, energy_now=85.0), limit=80), 0.0)
+
+
+class EstimatorAccuracyTests(unittest.TestCase):
+    """The estimate must predict time to empty better than the old 1-minute average.
+
+    Synthetic sessions with noise and 20 s bursts every 10 minutes: mixed use with a
+    video call, gaming then idle, and steady work. Error is against the real remaining
+    time of the same session, scored once a minute.
+    """
+
+    def session(self, kind, seed):
+        import random
+        rnd = random.Random(seed)
+
+        def load(t):
+            m = t / 60
+            base = {"mixed": 16 if 60 <= m < 85 else (6 if m >= 130 else 8),
+                    "gaming-then-idle": 35 if m < 40 else 7, "steady": 9}[kind]
+            return max(1, base + (18 if t % 600 < 20 else 0) + rnd.gauss(0, 1.2))
+        return [(t, load(t)) for t in range(0, 3 * 3600, 5)]
+
+    def mean_error(self, make_estimate):
+        errors = []
+        for kind in ("mixed", "gaming-then-idle", "steady"):
+            trace = self.session(kind, 1)
+            left = [0.0] * len(trace)
+            total = 0.0
+            for i in range(len(trace) - 1, -1, -1):
+                total += trace[i][1] * 5 / 3600
+                left[i] = total
+            estimate = make_estimate()
+            for i, (t, p) in enumerate(trace):
+                watts = estimate(t, p)
+                if i % 12 == 0 and t >= 300 and left[i] > 2:
+                    true_hours = (len(trace) - i) * 5 / 3600
+                    errors.append(abs(left[i] / watts - true_hours) / true_hours)
+        return sum(errors) / len(errors)
+
+    def test_beats_one_minute_average(self):
+        def old():
+            s = power.PowerSmoother(60)
+            return lambda t, p: s.update("Discharging", p, t)
+
+        def new():
+            e = power.Estimator()
+            return lambda t, p: e.update("Discharging", p, t)[0]
+        self.assertLess(self.mean_error(new), self.mean_error(old) * 0.97)
 
 
 class DaemonScheduleTests(unittest.TestCase):

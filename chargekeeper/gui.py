@@ -856,7 +856,11 @@ class Window(Adw.ApplicationWindow):
             sub = f"{fmt_hours(remaining)} until {target}%" if remaining else f"Charging to {target}%"
         elif status == "Discharging":
             title = "On battery" + (f" · {power:.1f} W" if power else "")
-            sub = f"About {fmt_hours(remaining)} left at this rate" if remaining else ""
+            sub = f"About {fmt_hours(remaining)} left" if remaining else ""
+            # Tell people when what they're doing right now would change that noticeably.
+            at_load = core.time_remaining(info, power=info.get("power_fast"))
+            if remaining and at_load and abs(at_load - remaining) / remaining > 0.15:
+                sub += f" · {fmt_hours(at_load)} at the current load"
         elif info["ac"]:
             if limit < 100 and cap is not None and cap > limit + 2:
                 title = "Plugged in · above the limit"

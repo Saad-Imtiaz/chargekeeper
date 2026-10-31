@@ -287,13 +287,19 @@ def combined_info():
     return info
 
 
-def time_remaining(info, limit=100):
+# Lithium-ion charging switches to constant voltage near full and the power falls
+# off; above CHARGE_KNEE the remaining energy is assumed to go in at half the rate.
+CHARGE_KNEE = 0.8
+CHARGE_TAPER = 0.5
+
+
+def time_remaining(info, limit=100, power=None):
     """Hours until empty (discharging) or until the target (charging).
 
-    Uses the smoothed power from power.BatteryMonitor when present: instantaneous
-    readings jump with every load change, which made the estimate jump too.
+    Uses the estimate from power.BatteryMonitor (power_avg) when present, which
+    blends recent use with the longer pattern; pass power to ask "at this load".
     """
-    power = info.get("power_avg") or info.get("power")
+    power = power or info.get("power_avg") or info.get("power")
     now = info.get("energy_now")
     full = info.get("energy_full")
     if not power or power < 0.3 or now is None:
@@ -302,7 +308,13 @@ def time_remaining(info, limit=100):
         return now / power
     if info["status"] == "Charging" and full:
         target = full * min(limit, 100) / 100
-        return max(target - now, 0) / power
+        if now >= target:
+            return 0.0
+        knee = full * CHARGE_KNEE
+        if now >= knee:
+            return (target - now) / power      # already tapering: the measured rate shows it
+        return (max(min(target, knee) - now, 0) / power
+                + max(target - knee, 0) / (power * CHARGE_TAPER))
     return None
 
 
