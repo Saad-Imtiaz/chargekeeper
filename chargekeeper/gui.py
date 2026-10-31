@@ -14,7 +14,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, VERSION, core  # noqa: E402
+from . import APP_ID, VERSION, core, tray  # noqa: E402
 from .cli import fmt_hours, helper_command  # noqa: E402
 
 GREEN = (0.15, 0.73, 0.42)
@@ -721,11 +721,20 @@ class Window(Adw.ApplicationWindow):
 
         notify = Adw.PreferencesGroup(title="Notifications")
         prefs = self.app.prefs
-        self.bg_row = Adw.SwitchRow(title="Run in background",
-                                    subtitle="Start at login and send notifications without a window",
+        self.bg_row = Adw.SwitchRow(title="Tray icon",
+                                    subtitle="Show the battery in the top bar with a quick limit menu. "
+                                             "Starts at login and sends notifications.",
                                     active=prefs["background"])
         self.bg_row.connect("notify::active", lambda r, _p: self.app.set_background(r.get_active()))
         notify.add(self.bg_row)
+        self.tray_row = Adw.ActionRow(title="The top bar can't show tray icons",
+                                      subtitle="GNOME needs the AppIndicator extension for this.",
+                                      visible=False)
+        self.tray_row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+        self.tray_button = Gtk.Button(label="Enable", valign=Gtk.Align.CENTER)
+        self.tray_button.connect("clicked", self._enable_tray_extension)
+        self.tray_row.add_suffix(self.tray_button)
+        notify.add(self.tray_row)
         for key, title, subtitle in (
             ("notify_unplug", "Unplug reminder",
              "When this laptop can't limit charging itself, remind me at the limit"),
@@ -1003,6 +1012,7 @@ class Window(Adw.ApplicationWindow):
         finally:
             self.syncing = False
         self.tlp_row.set_visible(self.app.tlp_active)
+        self.refresh_tray_row()
 
         cpu = core.cpu_info()
         parts = [p for p in (cpu["driver"], cpu["governor"]) if p]
@@ -1082,6 +1092,8 @@ class Window(Adw.ApplicationWindow):
             return
         self.refresh()
         self.refresh_charts()
+        if self.app.tray:
+            self.app.tray.update()
 
     def _on_limit_switch(self, row, _pspec):
         if not self.syncing:
@@ -1145,6 +1157,29 @@ class Window(Adw.ApplicationWindow):
         if not self.syncing and value:
             self.app.run_helper(["epp", value], lambda ok: self.refresh())
 
+    def refresh_tray_row(self):
+        missing = bool(self.app.tray) and not self.app.tray.host_available
+        uuid = tray.extension_to_enable()
+        self.tray_row.set_visible(missing)
+        self.tray_button.set_visible(uuid is not None)
+        self.tray_row.set_subtitle("GNOME needs the AppIndicator extension for this." if uuid else
+                                   "Install a tray or AppIndicator extension for your desktop.")
+
+    def _enable_tray_extension(self, _button):
+        uuid = tray.extension_to_enable()
+        if not uuid:
+            return
+        try:
+            proc = Gio.Subprocess.new(["gnome-extensions", "enable", uuid], Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error as exc:
+            self.toast(exc.message)
+            return
+
+        def done(p, result):
+            ok = p.wait_check_finish(result) if p else False
+            self.toast("Tray extension enabled" if ok else "Couldn't enable the extension")
+        proc.wait_check_async(None, done)
+
     def _copy_report(self, _button):
         info = core.combined_info() or {}
         backend = core.detect()
@@ -1180,6 +1215,7 @@ class App(Adw.Application):
         self.tlp_active = False
         self.ppd_proxy = None
         self.notified = {}
+        self.tray = None
 
     def _local_options(self, _app, options):
         if options.contains("background"):
@@ -1240,6 +1276,24 @@ class App(Adw.Application):
         elif not enabled and self.held:
             self.release()
             self.held = False
+        if enabled and self.tray is None and self.get_dbus_connection():
+            self.tray = tray.Tray(self)
+        elif not enabled and self.tray is not None:
+            self.tray.close()
+            self.tray = None
+        self.tray_changed()
+
+    def tray_changed(self):
+        if self.window:
+            self.window.refresh_tray_row()
+
+    def settings_changed(self):
+        """A change from the tray: bring the tray and the window up to date."""
+        if self.tray:
+            self.tray.update()
+        if self.window and not self.window.pending and not self.window.inflight:
+            self.window.refresh()
+            self.window.refresh_charts()
 
     def _about(self, *_):
         dialog = Adw.AboutDialog(
@@ -1281,8 +1335,10 @@ class App(Adw.Application):
             done(ok)
 
     def _report(self, text):
-        if self.window:
+        if self.window and self.window.get_visible():
             self.window.toast(text)
+        else:
+            self._notify("error", "Chargekeeper", text)
 
     # --- power-profiles-daemon ---
 
@@ -1324,6 +1380,8 @@ class App(Adw.Application):
         return True
 
     def _watch(self):
+        if self.tray:
+            self.tray.update()
         info = core.combined_info()
         if not info or info["capacity"] is None:
             return GLib.SOURCE_CONTINUE

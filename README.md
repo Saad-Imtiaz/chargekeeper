@@ -44,6 +44,11 @@ the limit off first.
 - **Usage**: time on battery, battery and energy used, average power and expected runtime, time on
   the charger, and which apps used the most processor time while on battery (today or 7 days).
   The service reads `/proc` once a minute; nothing is recorded while plugged in.
+- **Tray icon**: battery level in the top bar. Click it for a menu with the current state, the
+  charge limit (60–90% or no limit), **Charge to full once**, and Open / Quit. Turn it on under
+  System → Tray icon; it starts at login. It uses the StatusNotifierItem protocol: KDE, Cinnamon,
+  XFCE and others show it natively, GNOME needs the AppIndicator extension (Ubuntu ships it; the
+  app offers to enable it).
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
 - **Power**: power-profiles-daemon mode, firmware platform profile, CPU energy preference.
 - **Re-applies settings** every 30 s (10 s for the software limit) and after resume, for firmware
