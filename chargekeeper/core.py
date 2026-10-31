@@ -16,6 +16,7 @@ CONFIG_PATH = "/etc/chargekeeper/config.json"
 DATA_DIR = "/var/lib/chargekeeper"
 HISTORY_PATH = DATA_DIR + "/history.csv"
 HEALTH_PATH = DATA_DIR + "/health.csv"
+USAGE_PATH = DATA_DIR + "/usage.json"
 STATE_PATH = "/run/chargekeeper/state.json"
 
 ACER_DRIVER = "/sys/bus/wmi/drivers/acer-wmi-battery"
@@ -38,6 +39,14 @@ DEFAULT_CONFIG = {
 }
 
 HISTORY_KEEP_LINES = 14 * 24 * 60
+USAGE_KEEP_DAYS = 8
+
+# Helper processes reported under the app the user knows.
+APP_ALIASES = {
+    "Isolated Web Co": "firefox", "Web Content": "firefox", "WebExtensions": "firefox",
+    "Privileged Cont": "firefox", "RDD Process": "firefox", "Socket Process": "firefox",
+    "Utility Process": "firefox", "GPU Process": "firefox",
+}
 
 # Below this level "pause charging" and "run on battery" are dropped so a
 # forgotten setting can never run a plugged-in laptop flat.
@@ -692,6 +701,114 @@ def load_health():
     except (OSError, ValueError, IndexError):
         pass
     return rows
+
+
+# --- battery usage ---------------------------------------------------------
+
+class CpuSampler:
+    """CPU seconds used per app between calls, from /proc/<pid>/stat."""
+
+    def __init__(self, proc="/proc"):
+        self.proc = proc
+        self.last = {}
+        self.last_uptime = None
+        self.ticks = os.sysconf("SC_CLK_TCK")
+
+    def sample(self):
+        uptime = float((read(self.proc + "/uptime") or "0").split()[0])
+        current, used_by = {}, {}
+        for entry in os.scandir(self.proc):
+            if not entry.name.isdigit():
+                continue
+            stat = read(f"{self.proc}/{entry.name}/stat")
+            if not stat:
+                continue
+            # The name is in parentheses and may itself contain spaces or ')'.
+            close = stat.rfind(")")
+            name = stat[stat.find("(") + 1:close]
+            fields = stat[close + 2:].split()
+            try:
+                ppid, used, started = int(fields[1]), int(fields[11]) + int(fields[12]), int(fields[19])
+            except (IndexError, ValueError):
+                continue
+            pid = int(entry.name)
+            if pid == 2 or ppid == 2:
+                name = "Kernel"
+            name = APP_ALIASES.get(name, name)
+            current[pid] = (name, used, started)
+            prev = self.last.get(pid)
+            if prev and prev[2] == started:
+                delta = used - prev[1]
+            elif self.last_uptime is not None and started / self.ticks >= self.last_uptime:
+                delta = used          # started since the last sample
+            else:
+                continue
+            if delta > 0:
+                used_by[name] = used_by.get(name, 0) + delta / self.ticks
+        first = self.last_uptime is None
+        self.last, self.last_uptime = current, uptime
+        return {} if first else used_by
+
+
+def load_usage():
+    try:
+        with open(USAGE_PATH) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def add_usage(apps, seconds_on_battery):
+    """Add one interval of on-battery app CPU time to today's totals."""
+    data = load_usage()
+    today = data.setdefault(time.strftime("%Y-%m-%d"), {"battery_seconds": 0, "apps": {}})
+    today["battery_seconds"] += seconds_on_battery
+    for name, cpu in apps.items():
+        today["apps"][name] = round(today["apps"].get(name, 0) + cpu, 2)
+    for day in sorted(data)[:-USAGE_KEEP_DAYS]:
+        del data[day]
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = USAGE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, USAGE_PATH)
+
+
+def app_usage(days):
+    """[(app, cpu_seconds)] on battery over the last `days` days, busiest first."""
+    data = load_usage()
+    keep = {time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400)) for i in range(days)}
+    totals = {}
+    for day, entry in data.items():
+        if day in keep:
+            for name, cpu in entry.get("apps", {}).items():
+                totals[name] = totals.get(name, 0) + cpu
+    return sorted(totals.items(), key=lambda item: -item[1])
+
+
+def usage_summary(points, max_gap=180):
+    """Time, charge and energy on battery and on the charger from history samples."""
+    out = {"battery_seconds": 0, "used_pct": 0, "energy_wh": 0.0,
+           "plugged_seconds": 0, "charged_pct": 0}
+    for a, b in zip(points, points[1:]):
+        dt = b["t"] - a["t"]
+        if dt <= 0 or dt > max_gap:
+            continue
+        if a["ac"]:
+            out["plugged_seconds"] += dt
+            if a["capacity"] is not None and b["capacity"] is not None:
+                out["charged_pct"] += max(0, b["capacity"] - a["capacity"])
+        else:
+            out["battery_seconds"] += dt
+            if a["power"] is not None:
+                out["energy_wh"] += a["power"] * dt / 3600
+            if a["capacity"] is not None and b["capacity"] is not None:
+                out["used_pct"] += max(0, a["capacity"] - b["capacity"])
+    hours = out["battery_seconds"] / 3600
+    out["average_w"] = out["energy_wh"] / hours if hours > 0.05 else None
+    return out
 
 
 def daemon_state():

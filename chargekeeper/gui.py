@@ -42,6 +42,19 @@ BEHAVIOUR_NAMES = {
 }
 PRESETS = (60, 70, 80, 85, 90)
 RANGES = (("6 hours", 6 * 3600), ("24 hours", 24 * 3600), ("7 days", 7 * 86400))
+USAGE_RANGES = (("Today", 1), ("Last 7 days", 7))
+USAGE_APPS = 8
+
+
+def fmt_duration(seconds):
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    h, m = divmod(minutes, 60)
+    if h < 24:
+        return f"{h} h {m:02d} min"
+    d, h = divmod(h, 24)
+    return f"{d} d {h} h"
 
 
 def load_prefs():
@@ -359,6 +372,7 @@ class Window(Adw.ApplicationWindow):
         self.start_range = (10, 1)
         self.backend = None
         self.history_range = RANGES[1][1]
+        self.usage_days = USAGE_RANGES[0][1]
         self.last_chart = 0
 
         self.toasts = Adw.ToastOverlay()
@@ -378,12 +392,13 @@ class Window(Adw.ApplicationWindow):
 
         bottom = Adw.ViewSwitcherBar(stack=self.stack)
         view.add_bottom_bar(bottom)
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 520sp"))
+        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 600sp"))
         breakpoint.add_setter(bottom, "reveal", True)
         breakpoint.add_setter(switcher, "visible", False)
         self.add_breakpoint(breakpoint)
 
         self._build_overview()
+        self._build_usage()
         self._build_charging()
         self._build_health()
         self._build_system()
@@ -440,7 +455,7 @@ class Window(Adw.ApplicationWindow):
         self.v_power = info_row(now, "Power", "power-profile-balanced-symbolic")
         self.v_time = info_row(now, "Time", "preferences-system-time-symbolic")
         self.v_energy = info_row(now, "Energy", "battery-level-70-symbolic")
-        self.v_temp = info_row(now, "Battery temperature", "temperature-symbolic")
+        self.v_temp = info_row(now, "Battery temperature", "weather-clear-symbolic")
         page.add(now)
 
         history = Adw.PreferencesGroup(title="History")
@@ -460,6 +475,88 @@ class Window(Adw.ApplicationWindow):
             row.set_child(inner)
             history.add(row)
         page.add(history)
+
+    def _build_usage(self):
+        page = Adw.PreferencesPage()
+        self.stack.add_titled_with_icon(page, "usage", "Usage", "utilities-system-monitor-symbolic")
+
+        self.usage_battery = Adw.PreferencesGroup(title="On battery")
+        picker = Gtk.DropDown.new_from_strings([label for label, _ in USAGE_RANGES])
+        picker.set_valign(Gtk.Align.CENTER)
+        picker.connect("notify::selected", self._on_usage_range)
+        self.usage_battery.set_header_suffix(picker)
+        self.u_time = info_row(self.usage_battery, "Time on battery", "preferences-system-time-symbolic")
+        self.u_used = info_row(self.usage_battery, "Battery used", "battery-level-30-symbolic")
+        self.u_energy = info_row(self.usage_battery, "Energy used", "battery-caution-symbolic")
+        self.u_average = info_row(self.usage_battery, "Average power", "power-profile-balanced-symbolic")
+        self.u_runtime = info_row(self.usage_battery, "A full charge lasts about", "battery-full-symbolic")
+        page.add(self.usage_battery)
+
+        charger = Adw.PreferencesGroup(title="On the charger")
+        self.u_plugged = info_row(charger, "Time plugged in", "ac-adapter-symbolic")
+        self.u_charged = info_row(charger, "Charged", "battery-full-charging-symbolic")
+        page.add(charger)
+
+        self.apps_group = Adw.PreferencesGroup(
+            title="Apps on battery",
+            description="Share of processor time while running on battery. After the screen, the "
+                        "processor is usually what drains the battery most.")
+        self.apps_empty = Adw.ActionRow(title="No time on battery yet",
+                                        subtitle="Apps show up here after the laptop runs unplugged.")
+        self.apps_group.add(self.apps_empty)
+        self.app_rows = []
+        for _ in range(USAGE_APPS):
+            row = Adw.ActionRow(visible=False)
+            bar = Gtk.LevelBar(valign=Gtk.Align.CENTER, width_request=90, max_value=1)
+            label = Gtk.Label(css_classes=["dim-label", "numeric"], width_chars=4, xalign=1)
+            row.add_suffix(bar)
+            row.add_suffix(label)
+            self.apps_group.add(row)
+            self.app_rows.append((row, bar, label))
+        page.add(self.apps_group)
+
+    def _on_usage_range(self, dropdown, _pspec):
+        self.usage_days = USAGE_RANGES[dropdown.get_selected()][1]
+        self.refresh_usage()
+
+    def refresh_usage(self):
+        now = time.time()
+        if self.usage_days == 1:
+            today = time.localtime(now)
+            since = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+        else:
+            since = now - self.usage_days * 86400
+        summary = core.usage_summary(core.load_history(since))
+        on_battery = summary["battery_seconds"]
+        self.u_time.set_label(fmt_duration(on_battery) if on_battery else "—")
+        self.u_used.set_label(f"{summary['used_pct']}%" if on_battery else "—")
+        self.u_energy.set_label(f"{summary['energy_wh']:.1f} Wh" if summary["energy_wh"] else "—")
+        average = summary["average_w"]
+        self.u_average.set_label(f"{average:.1f} W" if average else "—")
+        info = core.combined_info()
+        if average and info and info["energy_full"]:
+            self.u_runtime.set_label(fmt_hours(info["energy_full"] / average) + " at this rate")
+        else:
+            self.u_runtime.set_label("—")
+        plugged = summary["plugged_seconds"]
+        self.u_plugged.set_label(fmt_duration(plugged) if plugged else "—")
+        self.u_charged.set_label(f"{summary['charged_pct']}%" if plugged else "—")
+
+        apps = core.app_usage(self.usage_days)
+        total = sum(cpu for _, cpu in apps) or 1
+        self.apps_empty.set_visible(not apps)
+        for i, (row, bar, label) in enumerate(self.app_rows):
+            if i >= len(apps):
+                row.set_visible(False)
+                continue
+            name, cpu = apps[i]
+            share = cpu / total
+            row.set_title(GLib.markup_escape_text(name))
+            row.set_subtitle(f"{fmt_duration(cpu)} of processor time" if cpu >= 60
+                             else f"{cpu:.0f} s of processor time")
+            bar.set_value(share)
+            label.set_label(f"{share * 100:.0f}%")
+            row.set_visible(True)
 
     def _build_charging(self):
         page = Adw.PreferencesPage()
@@ -525,7 +622,7 @@ class Window(Adw.ApplicationWindow):
             title="Charge to full once",
             subtitle="For a long day away from a charger. The limit comes back when you unplug, "
                      f"or {core.TOP_UP_FULL_HOURS} hours after the battery is full.")
-        self.topup_row.add_prefix(Gtk.Image(icon_name="airplane-mode-symbolic"))
+        self.topup_row.add_prefix(Gtk.Image(icon_name="battery-full-charged-symbolic"))
         self.topup_row.connect("notify::active", self._on_topup)
         self.topup_group.add(self.topup_row)
         page.add(self.topup_group)
@@ -952,6 +1049,7 @@ class Window(Adw.ApplicationWindow):
         health = [r for r in core.load_health() if r["health"] is not None]
         h0 = min(health[0]["t"], now - 30 * 86400) if health else now - 30 * 86400
         self.chart_health.set_data([(r["t"], r["health"]) for r in health], h0, now, reference=80)
+        self.refresh_usage()
 
     # --- changes ---
 

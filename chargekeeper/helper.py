@@ -99,6 +99,7 @@ def cmd_daemon(args):
     last_ac = None
     last_log = 0
     full_since = None
+    sampler = core.CpuSampler()
     while True:
         error = None
         backend = None
@@ -143,6 +144,10 @@ def cmd_daemon(args):
 
             if info and time.time() - last_log >= LOG_SECONDS:
                 core.log_sample(info)
+                # Sample every time so the baseline stays fresh; keep it only on battery.
+                apps = sampler.sample()
+                if ac is False and last_log:
+                    core.add_usage(apps, round(time.time() - last_log))
                 last_log = time.time()
             last_ac = ac
         except Exception as exc:  # keep the daemon alive, surface the error in the GUI

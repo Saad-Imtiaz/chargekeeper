@@ -41,6 +41,9 @@ the limit off first.
   unplugged, or after 24 hours at the latest.
 - **Health**: full-charge vs design capacity, wear, cycles, temperature, a daily health history.
 - **History charts** of charge level (with plugged-in periods) and power draw: 6 h, 24 h, 7 days.
+- **Usage**: time on battery, battery and energy used, average power and expected runtime, time on
+  the charger, and which apps used the most processor time while on battery (today or 7 days).
+  The service reads `/proc` once a minute; nothing is recorded while plugged in.
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
 - **Power**: power-profiles-daemon mode, firmware platform profile, CPU energy preference.
 - **Re-applies settings** every 30 s (10 s for the software limit) and after resume, for firmware
@@ -64,7 +67,7 @@ chargekeeper calibrate on    # Acer
 |---|---|
 | `/usr/lib/chargekeeper/` | Python package and `chargekeeper-helper` (root) |
 | `/etc/chargekeeper/config.json` | limit settings (system-wide) |
-| `/var/lib/chargekeeper/` | history and health logs |
+| `/var/lib/chargekeeper/` | history, health and app usage logs |
 | `~/.config/chargekeeper/prefs.json` | notification preferences (per user) |
 
 The app runs as your user. Changes go through `pkexec chargekeeper-helper`. A polkit rule lets

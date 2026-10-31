@@ -177,6 +177,37 @@ class FullTests(unittest.TestCase):
         self.assertFalse(core.is_full(None))
 
 
+class UsageTests(unittest.TestCase):
+    def test_summary(self):
+        def point(t, cap, power, ac):
+            return {"t": t, "capacity": cap, "power": power, "ac": ac}
+        points = [point(0, 80, 10, False), point(180, 79, 10, False), point(360, 78, 10, False),
+                  point(1000, 78, 30, True), point(1060, 80, 30, True)]   # gap of 640 s skipped
+        summary = core.usage_summary(points)
+        self.assertEqual(summary["battery_seconds"], 360)
+        self.assertEqual(summary["used_pct"], 2)
+        self.assertAlmostEqual(summary["energy_wh"], 1.0)
+        self.assertAlmostEqual(summary["average_w"], 10)
+        self.assertEqual((summary["plugged_seconds"], summary["charged_pct"]), (60, 2))
+
+    def test_sampler(self):
+        with tempfile.TemporaryDirectory() as proc:
+            def stat(pid, name, ppid, ticks, started):
+                fields = ["S", ppid] + [0] * 9 + [ticks, 0] + [0] * 6 + [started]
+                make(proc, f"{pid}/stat", f"{pid} ({name}) " + " ".join(map(str, fields)))
+            hz = os.sysconf("SC_CLK_TCK")
+            make(proc, "uptime", "100.0 0")
+            stat(10, "Web Content", 1, 5 * hz, 1 * hz)
+            stat(11, "kworker/0:1", 2, 1 * hz, 1 * hz)
+            sampler = core.CpuSampler(proc)
+            self.assertEqual(sampler.sample(), {})               # first call is the baseline
+            make(proc, "uptime", "160.0 0")
+            stat(10, "Web Content", 1, 7 * hz, 1 * hz)
+            stat(11, "kworker/0:1", 2, 2 * hz, 1 * hz)
+            stat(12, "make (job)", 1, 3 * hz, 120 * hz)        # started after the baseline
+            self.assertEqual(sampler.sample(), {"firefox": 2, "Kernel": 1, "make (job)": 3})
+
+
 class ParseTests(unittest.TestCase):
     def test_choices(self):
         self.assertEqual(core.parse_choices("auto [inhibit-charge] force-discharge"),
