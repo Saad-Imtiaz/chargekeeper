@@ -16,6 +16,7 @@ rm -rf /usr/lib/chargekeeper /etc/chargekeeper /var/lib/chargekeeper /run/charge
 rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
     /usr/lib/systemd/system-sleep/chargekeeper \
     /usr/share/polkit-1/actions/dev.chargekeeper.Chargekeeper.policy \
+    /usr/share/polkit-1/rules.d/50-dev.chargekeeper.Chargekeeper.rules \
     /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop \
     /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg
 systemctl daemon-reload

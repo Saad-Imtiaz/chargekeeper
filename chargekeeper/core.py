@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "behaviour": "auto",
     "charge_type": None,
     "calibrating": False,
+    "calibration_started": None,
 }
 
 HISTORY_KEEP_LINES = 14 * 24 * 60
@@ -41,6 +42,10 @@ HISTORY_KEEP_LINES = 14 * 24 * 60
 # Below this level "pause charging" and "run on battery" are dropped so a
 # forgotten setting can never run a plugged-in laptop flat.
 SAFETY_FLOOR = 20
+
+# Calibration is switched off after this long even if the firmware never says
+# it finished, so a forgotten calibration can't keep cycling the battery.
+CALIBRATION_MAX_HOURS = 24
 
 
 # --- sysfs helpers ---------------------------------------------------------
@@ -227,6 +232,9 @@ class Backend:
     supports_start = False
     software = False        # limit enforced by the daemon, not by firmware
     calibration = False
+    min_start = 0           # lowest start threshold the firmware accepts
+    min_gap = 1             # firmware needs end - start >= min_gap
+    fixed_text = None       # label for a fixed limit whose exact value is unknown
 
     def __init__(self, bats):
         self.bats = bats
@@ -292,6 +300,9 @@ class Backend:
             "supports_start": self.supports_start,
             "software": self.software,
             "calibration": self.calibration,
+            "min_start": self.min_start,
+            "min_gap": self.min_gap,
+            "fixed_text": self.fixed_text,
             "behaviours": self.behaviours(),
             "charge_types": self.charge_types(),
         }
@@ -309,6 +320,9 @@ class ThresholdBackend(Backend):
         self.threshold_bats = threshold_bats
         self.supports_start = any(_attr(b, START_NAMES) for b in threshold_bats)
         vendor = dmi("sys_vendor") or "Laptop"
+        if vendor.lower().startswith("dell"):
+            # dell-laptop: start 50-95, end 55-100, end at least 5 above start.
+            self.min_end, self.min_start, self.min_gap = 55, 50, 5
         self.name = f"{vendor} firmware charge thresholds"
         self.detail = ("Start and stop thresholds are set in firmware." if self.supports_start
                        else "The stop threshold is set in firmware.")
@@ -404,6 +418,7 @@ class IdeapadBackend(FixedLimitBackend):
     id = "ideapad"
     name = "Lenovo conservation mode"
     detail = "Lenovo firmware holds the charge at a fixed level (80% on newer models, 60% on older ones)."
+    fixed_text = "60–80%"
 
     def __init__(self, bats, path):
         super().__init__(bats)
@@ -530,9 +545,9 @@ def target(config, backend):
     if end >= 100:
         return 100, None
     start = config.get("start")
-    if start is None or start >= end:
-        start = max(end - 5, 0)
-    return end, start
+    if start is None or start > end - backend.min_gap:
+        start = end - max(5, backend.min_gap)
+    return end, max(start, backend.min_start, 0)
 
 
 def apply(backend, config):
@@ -561,6 +576,19 @@ def behaviour_override(config, info):
         config["behaviour"] = "auto"
         return True
     return False
+
+
+def calibration_stop_reason(backend, config, info):
+    """Why a running calibration should be switched off now, or None."""
+    elapsed = time.time() - (config.get("calibration_started") or time.time())
+    if elapsed > CALIBRATION_MAX_HOURS * 3600:
+        return f"still running after {CALIBRATION_MAX_HOURS} hours"
+    if info and info["ac"] is False:
+        return "the charger was unplugged"
+    # Give the firmware time to start before trusting its flag.
+    if elapsed > 600 and not backend.calibrating():
+        return "the firmware finished"
+    return None
 
 
 def release(backend):

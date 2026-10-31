@@ -72,6 +72,33 @@ class ThresholdTests(unittest.TestCase):
         self.assertIsNone(core.target(dict(config, calibrating=True), self.backend))
 
 
+class DellTests(unittest.TestCase):
+    def test_dell_gap_and_minimums(self):
+        backend = core.ThresholdBackend([], [])
+        backend.min_end, backend.min_start, backend.min_gap = 55, 50, 5
+        self.assertEqual(backend.snap(40), 55)
+        config = dict(core.DEFAULT_CONFIG, end=85, start=83)
+        self.assertEqual(core.target(config, backend), (85, 80))   # gap of 2 widened to 5
+        self.assertEqual(core.target(dict(config, end=55, start=20), backend), (55, 50))
+
+
+class CalibrationTests(unittest.TestCase):
+    def test_stop_reasons(self):
+        backend = core.AcerBackend([])
+        backend.calibrating = lambda: True
+        now = core.time.time()
+        info = {"ac": True}
+        config = dict(core.DEFAULT_CONFIG, calibrating=True, calibration_started=now - 3600)
+        self.assertIsNone(core.calibration_stop_reason(backend, config, info))
+        self.assertIn("unplugged", core.calibration_stop_reason(backend, config, {"ac": False}))
+        old = dict(config, calibration_started=now - 25 * 3600)
+        self.assertIn("24 hours", core.calibration_stop_reason(backend, old, info))
+        backend.calibrating = lambda: False
+        self.assertIn("finished", core.calibration_stop_reason(backend, config, info))
+        fresh = dict(config, calibration_started=now - 60)
+        self.assertIsNone(core.calibration_stop_reason(backend, fresh, info))
+
+
 class FixedTests(unittest.TestCase):
     def test_acer_snaps_85_to_80(self):
         with tempfile.TemporaryDirectory() as tmp:

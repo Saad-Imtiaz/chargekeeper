@@ -147,7 +147,7 @@ class Ring(Gtk.Widget):
     """Gauge arc with a centered value and an optional limit tick."""
 
     def __init__(self, size):
-        super().__init__(halign=Gtk.Align.CENTER)
+        super().__init__(halign=Gtk.Align.CENTER, accessible_role=Gtk.AccessibleRole.IMG)
         self.set_size_request(size, size)
         self.value = None
         self.text = "—"
@@ -157,6 +157,10 @@ class Ring(Gtk.Widget):
 
     def update(self, value, text, caption, color, marker=None):
         self.value, self.text, self.caption, self.color, self.marker = value, text, caption, color, marker
+        spoken = " ".join(p for p in (text, caption) if p and p != "—")
+        if marker is not None and marker < 100:
+            spoken += f", limit {marker}%"
+        self.update_property([Gtk.AccessibleProperty.LABEL], [spoken or "No data"])
         self.queue_draw()
 
     def do_snapshot(self, snapshot):
@@ -187,20 +191,50 @@ class Ring(Gtk.Widget):
 class Chart(Gtk.Widget):
     """Time series line chart with an optional dashed reference line and AC strip."""
 
-    def __init__(self, color, unit, fixed_max=None, height=150):
-        super().__init__(hexpand=True, margin_top=8, margin_bottom=8, margin_start=8, margin_end=8)
+    LEFT, RIGHT, TOP, BOTTOM = 44, 6, 6, 22
+
+    def __init__(self, color, unit, fixed_max=None, height=150, name="Chart"):
+        super().__init__(hexpand=True, margin_top=8, margin_bottom=8, margin_start=8, margin_end=8,
+                         accessible_role=Gtk.AccessibleRole.IMG)
         self.set_size_request(200, height)
-        self.color, self.unit, self.fixed_max = color, unit, fixed_max
+        self.color, self.unit, self.fixed_max, self.name = color, unit, fixed_max, name
         self.points, self.t0, self.t1 = [], 0, 1
         self.reference = None
         self.strip = []
         self.empty_text = "Collecting data…"
+        self.hover_x = None
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self._on_motion)
+        motion.connect("leave", self._on_leave)
+        self.add_controller(motion)
+
+    def _on_motion(self, _ctrl, x, _y):
+        self.hover_x = x
+        self.queue_draw()
+
+    def _on_leave(self, _ctrl):
+        self.hover_x = None
+        self.queue_draw()
 
     def set_data(self, points, t0, t1, reference=None, strip=None):
         self.points, self.t0, self.t1 = points, t0, t1
         self.reference = reference
         self.strip = strip or []
+        if len(points) >= 2:
+            values = [v for _, v in points]
+            summary = (f"{self.name}: now {values[-1]:.0f}{self.unit}, lowest {min(values):.0f}{self.unit}, "
+                       f"highest {max(values):.0f}{self.unit}")
+        else:
+            summary = f"{self.name}: {self.empty_text}"
+        self.update_property([Gtk.AccessibleProperty.LABEL], [summary])
         self.queue_draw()
+
+    def _nearest(self, t):
+        best = None
+        for point in self.points:
+            if best is None or abs(point[0] - t) < abs(best[0] - t):
+                best = point
+        return best
 
     def _ymax(self):
         if self.fixed_max:
@@ -212,7 +246,7 @@ class Chart(Gtk.Widget):
     def do_snapshot(self, snapshot):
         w, h = self.get_width(), self.get_height()
         p = Painter(self, snapshot)
-        left, right, top, bottom = 44, 6, 6, 22
+        left, right, top, bottom = self.LEFT, self.RIGHT, self.TOP, self.BOTTOM
         pw, ph = w - left - right, h - top - bottom
         if pw <= 10 or ph <= 10:
             return
@@ -265,6 +299,20 @@ class Chart(Gtk.Widget):
             p.fill(seg + [(seg[-1][0], top + ph), (seg[0][0], top + ph)], self.color, 0.14)
             p.stroke(seg, 2, self.color)
 
+        if self.hover_x is not None and left <= self.hover_x <= left + pw:
+            point = self._nearest(self.t0 + span * (self.hover_x - left) / pw)
+            if point and abs(x_of(point[0]) - self.hover_x) < max(12, pw / 40):
+                x, y = x_of(point[0]), y_of(point[1])
+                p.stroke([(x, top), (x, top + ph)], 1, None, 0.35)
+                p.stroke(arc_points(x, y, 3, 0, 2 * math.pi, 16), 2.5, self.color)
+                fmt = "%H:%M" if span <= 86400 else "%a %H:%M"
+                decimals = 1 if self.unit.strip() == "W" else 0
+                label = f"{point[1]:.{decimals}f}{self.unit} · {time.strftime(fmt, time.localtime(point[0]))}"
+                layout, (tw, th) = p.layout(label, 9, bold=True)
+                tx = min(max(x - tw / 2, left), left + pw - tw)
+                p.rect(tx - 4, top, tw + 8, th + 4, None, 0.08)
+                p.text(layout, tx, top + 2)
+
 
 # --- small builders --------------------------------------------------------
 
@@ -308,6 +356,7 @@ class Window(Adw.ApplicationWindow):
         self.pending_source = 0
         self.inflight = False
         self.hint_ids = None
+        self.start_range = (10, 1)
         self.backend = None
         self.history_range = RANGES[1][1]
         self.last_chart = 0
@@ -398,8 +447,8 @@ class Window(Adw.ApplicationWindow):
         picker.set_valign(Gtk.Align.CENTER)
         picker.connect("notify::selected", self._on_range)
         history.set_header_suffix(picker)
-        self.chart_level = Chart(GREEN, "%", fixed_max=100)
-        self.chart_power = Chart(PURPLE, " W", height=120)
+        self.chart_level = Chart(GREEN, "%", fixed_max=100, name="Charge level")
+        self.chart_power = Chart(PURPLE, " W", height=120, name="Power draw")
         for title, chart in (("Charge level", self.chart_level), ("Power draw", self.chart_power)):
             row = Adw.PreferencesRow(activatable=False)
             inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -510,7 +559,7 @@ class Window(Adw.ApplicationWindow):
 
         trend = Adw.PreferencesGroup(title="Health over time",
                                      description="One sample per day, recorded by the background service.")
-        self.chart_health = Chart(GREEN, "%", fixed_max=100, height=130)
+        self.chart_health = Chart(GREEN, "%", fixed_max=100, height=130, name="Battery health")
         self.chart_health.empty_text = "Needs a few days of data"
         row = Adw.PreferencesRow(activatable=False)
         row.set_child(self.chart_health)
@@ -751,21 +800,24 @@ class Window(Adw.ApplicationWindow):
                 self.fixed_row.set_visible(False)
                 self.start_row.set_visible(desc["supports_start"])
                 self.start_row.set_sensitive(enabled)
-                self.start_row.set_range(10, max(11, config["end"] - 1))
-                self.start_row.set_value(config["start"] if config["start"] is not None
+                self.start_range = (max(10, desc["min_start"]), desc["min_gap"])
+                self._set_start_range(config["end"])
+                wanted = core.target(dict(config, limit_enabled=True, top_up=False), backend)
+                self.start_row.set_value(wanted[1] if wanted and wanted[1] is not None
                                          else config["end"] - 5)
             else:
                 self.limit_group.set_title("Charge limit")
                 fixed = [s for s in desc["steps"] if s < 100]
+                levels = desc["fixed_text"] or " or ".join(f"{s}%" for s in fixed)
                 self.limit_group.set_description(
-                    "This laptop's firmware supports only "
-                    + " or ".join(f"{s}%" for s in fixed)
-                    + ", not a custom value. For lithium-ion cells 80% is close to ideal.")
+                    f"This laptop's firmware supports only {levels}, not a custom value. "
+                    "For lithium-ion cells 80% is close to ideal.")
                 self.scale_row.set_visible(False)
                 self.fixed_row.set_visible(True)
                 self.fixed_row.set_sensitive(enabled)
-                self.fixed_row.set_subtitle("Set by the firmware")
-                self.fixed_label.set_label(f"{backend.snap(config['end'] if enabled else fixed[-1])}%")
+                self.fixed_row.set_subtitle("Set by the firmware; the exact level depends on the model"
+                                            if desc["fixed_text"] else "Set by the firmware")
+                self.fixed_label.set_label(desc["fixed_text"] or f"{backend.snap(min(config['end'], fixed[-1]))}%")
                 self.start_row.set_visible(False)
             self.scale_value.set_label(f"{int(self.scale.get_value())}%")
 
@@ -932,8 +984,12 @@ class Window(Adw.ApplicationWindow):
         if self.backend and not self.backend.available:
             self.app.set_pref("reminder_level", value)
             return
-        self.start_row.set_range(10, max(11, value - 1))
+        self._set_start_range(value)
         self._queue(end=value)
+
+    def _set_start_range(self, end):
+        low, gap = self.start_range
+        self.start_row.set_range(low, max(low + 1, end - gap))
 
     def _on_start(self, row, _pspec):
         if not self.syncing:

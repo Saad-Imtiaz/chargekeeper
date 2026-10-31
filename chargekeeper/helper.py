@@ -55,6 +55,7 @@ def cmd_set(args):
     if args.calibration is not None:
         backend.set_calibration(args.calibration)
         config["calibrating"] = args.calibration
+        config["calibration_started"] = time.time() if args.calibration else None
 
     core.save_config(config)
     core.apply(backend, config)
@@ -113,6 +114,19 @@ def cmd_daemon(args):
 
             if core.behaviour_override(config, info):
                 core.save_config(config)
+
+            if config["calibrating"]:
+                if not config["calibration_started"]:
+                    config["calibration_started"] = time.time()
+                    core.save_config(config)
+                reason = core.calibration_stop_reason(backend, config, info)
+                if reason:
+                    print(f"Calibration stopped: {reason}", file=sys.stderr, flush=True)
+                    if backend.calibration:
+                        backend.set_calibration(False)
+                    config["calibrating"] = False
+                    config["calibration_started"] = None
+                    core.save_config(config)
 
             # Re-applied every cycle: covers boot, resume and firmware that
             # forgets its thresholds, and only writes on mismatch.

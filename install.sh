@@ -30,6 +30,12 @@ command -v pkexec >/dev/null || missing+=(pkexec)
 if [ ${#missing[@]} -gt 0 ]; then
     if command -v apt-get >/dev/null; then
         apt-get install -y python3-gi "${missing[@]}"
+    elif command -v dnf >/dev/null; then
+        dnf install -y python3-gobject gtk4 libadwaita polkit
+    elif command -v pacman >/dev/null; then
+        pacman -S --needed --noconfirm python-gobject gtk4 libadwaita polkit
+    elif command -v zypper >/dev/null; then
+        zypper --non-interactive install python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 polkit
     else
         echo "Install these packages first: python3-gobject, gtk4 (4.14+), libadwaita (1.5+), polkit" >&2
         exit 1
@@ -44,6 +50,8 @@ install -m 755 "$SRC/bin/chargekeeper-helper" /usr/lib/chargekeeper/chargekeeper
 install -m 755 "$SRC/bin/chargekeeper" /usr/bin/chargekeeper
 install -Dm 644 "$SRC/data/dev.chargekeeper.Chargekeeper.policy" \
     /usr/share/polkit-1/actions/dev.chargekeeper.Chargekeeper.policy
+install -Dm 644 "$SRC/data/dev.chargekeeper.Chargekeeper.rules" \
+    /usr/share/polkit-1/rules.d/50-dev.chargekeeper.Chargekeeper.rules
 install -Dm 644 "$SRC/data/chargekeeper.service" /etc/systemd/system/chargekeeper.service
 install -Dm 755 "$SRC/data/chargekeeper-resume" /usr/lib/systemd/system-sleep/chargekeeper
 install -Dm 644 "$SRC/data/dev.chargekeeper.Chargekeeper.desktop" \
@@ -55,8 +63,15 @@ update-desktop-database -q /usr/share/applications 2>/dev/null || true
 
 if [ "$WANT_ACER" -eq 1 ]; then
     echo "==> Building acer-wmi-battery $ACER_COMMIT with DKMS"
-    command -v dkms >/dev/null || apt-get install -y dkms
-    [ -d "/lib/modules/$(uname -r)/build" ] || apt-get install -y "linux-headers-$(uname -r)"
+    if command -v apt-get >/dev/null; then
+        command -v dkms >/dev/null || apt-get install -y dkms
+        command -v git >/dev/null || apt-get install -y git
+        [ -d "/lib/modules/$(uname -r)/build" ] || apt-get install -y "linux-headers-$(uname -r)"
+    fi
+    for tool in dkms git; do
+        command -v "$tool" >/dev/null || { echo "Install $tool first" >&2; exit 1; }
+    done
+    [ -d "/lib/modules/$(uname -r)/build" ] || { echo "Install the kernel headers for $(uname -r) first" >&2; exit 1; }
     dest="/usr/src/acer-wmi-battery-$ACER_VERSION"
     if dkms status -m acer-wmi-battery -v "$ACER_VERSION" | grep -q .; then
         dkms remove -m acer-wmi-battery -v "$ACER_VERSION" --all || true
@@ -89,7 +104,8 @@ if [ ! -f /etc/chargekeeper/config.json ]; then
   "top_up": false,
   "behaviour": "auto",
   "charge_type": null,
-  "calibrating": false
+  "calibrating": false,
+  "calibration_started": null
 }
 EOF
 fi

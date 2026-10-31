@@ -10,6 +10,8 @@ sudo ./install.sh          # app + service
 sudo ./install.sh --acer   # Acer laptops: also builds the acer-wmi-battery driver with DKMS
 ```
 
+The installer pulls in dependencies with apt, dnf, pacman or zypper.
+
 Remove with `sudo ./uninstall.sh` (add `--acer` to remove the driver too). Uninstalling switches
 the limit off first.
 
@@ -28,11 +30,13 @@ the limit off first.
   | none | everything else | unplug reminder notification at your chosen level |
 
   A requested limit the firmware can't do is rounded **down** to the nearest supported value, so
-  the battery is never charged past what you asked for.
+  the battery is never charged past what you asked for. Dell's rules (stop 55–100%, start 50–95%,
+  stop at least 5% above start) are applied automatically.
 - **Charge to 100% once**: lifts the limit until you unplug, then restores it.
 - **Pause charging / run on battery while plugged in**, where the kernel exposes `charge_behaviour`.
 - **Charging mode** (Standard, Adaptive, Long Life, …) on Dell and others with `charge_types`.
-- **Calibration** on Acer.
+- **Calibration** on Acer. It switches itself off when the firmware finishes, when the charger is
+  unplugged, or after 24 hours at the latest.
 - **Health**: full-charge vs design capacity, wear, cycles, temperature, a daily health history.
 - **History charts** of charge level (with plugged-in periods) and power draw: 6 h, 24 h, 7 days.
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
@@ -61,8 +65,9 @@ chargekeeper calibrate on    # Acer
 | `/var/lib/chargekeeper/` | history and health logs |
 | `~/.config/chargekeeper/prefs.json` | notification preferences (per user) |
 
-The app runs as your user. Changes go through `pkexec chargekeeper-helper`. The polkit policy lets
-the active local user change battery settings without a password. The helper only accepts
+The app runs as your user. Changes go through `pkexec chargekeeper-helper`. A polkit rule lets
+administrators (`sudo`, `wheel` or `admin` group) at the local, active seat change battery settings
+without a password; other users are asked for an administrator password. The helper only accepts
 validated values (percentages and choices the firmware lists).
 
 ## Tests
