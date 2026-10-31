@@ -86,6 +86,17 @@ def write(path, value):
         f.write(f"{value}\n")
 
 
+def write_threshold(path, value):
+    """Write a charge threshold, turning the kernel's EINVAL into an actionable message."""
+    try:
+        write(path, value)
+    except OSError as exc:
+        if exc.errno == 22:
+            raise OSError(22, f"the firmware does not accept {value}%. Some models only allow "
+                              "80% or 100%; choose 80%") from exc
+        raise
+
+
 def parse_choices(text):
     """'auto [inhibit-charge] force-discharge' -> (choices, current)."""
     choices, current = [], None
@@ -135,7 +146,8 @@ def ac_online():
 
 def battery_temperature(bat):
     tenths = read_int(bat + "/temp")
-    if tenths is not None:
+    # Some firmware reports 0 or a Kelvin-based value when there is no sensor.
+    if tenths is not None and -200 < tenths < 1000 and tenths != 0:
         return tenths / 10
     for path in glob.glob(bat + "/hwmon*/temp1_input"):
         milli = read_int(path)
@@ -215,6 +227,9 @@ def combined_info():
                 break
         info["name"] = " + ".join(i["name"] for i in infos)
     info["ac"] = ac_online()
+    if info["ac"] is None:
+        # No adapter reports its state (some USB-C-only designs): infer it from the battery.
+        info["ac"] = {"Charging": True, "Full": True, "Discharging": False}.get(info["status"])
     info["batteries"] = infos
     return info
 
@@ -250,6 +265,7 @@ class Backend:
     calibration = False
     min_start = 0           # lowest start threshold the firmware accepts
     min_gap = 1             # firmware needs end - start >= min_gap
+    fixed_gap = None        # firmware derives start = end - fixed_gap by itself
     fixed_text = None       # label for a fixed limit whose exact value is unknown
 
     def __init__(self, bats):
@@ -318,6 +334,7 @@ class Backend:
             "calibration": self.calibration,
             "min_start": self.min_start,
             "min_gap": self.min_gap,
+            "fixed_gap": self.fixed_gap,
             "fixed_text": self.fixed_text,
             "behaviours": self.behaviours(),
             "charge_types": self.charge_types(),
@@ -336,9 +353,19 @@ class ThresholdBackend(Backend):
         self.threshold_bats = threshold_bats
         self.supports_start = any(_attr(b, START_NAMES) for b in threshold_bats)
         vendor = dmi("sys_vendor") or "Laptop"
-        if vendor.lower().startswith("dell"):
+        maker = vendor.lower()
+        if maker.startswith("dell"):
             # dell-laptop: start 50-95, end 55-100, end at least 5 above start.
             self.min_end, self.min_start, self.min_gap = 55, 50, 5
+        elif maker.startswith(("lg electronics", "toshiba", "dynabook")):
+            # lg-laptop and toshiba_acpi accept only 80 or 100 and reject anything else.
+            self.continuous, self.steps, self.min_end = False, (80, 100), 80
+            self.detail = "The firmware supports a single fixed 80% limit."
+        elif maker.startswith("micro-star"):
+            # msi-ec keeps one value in the EC: start is always end - 10, and writing
+            # start moves end. Matching that stops the daemon rewriting both each cycle.
+            self.min_end, self.min_gap, self.fixed_gap = 20, 10, 10
+            self.detail = "MSI firmware resumes charging 10% below the stop threshold."
         self.name = f"{vendor} firmware charge thresholds"
         self.detail = ("Start and stop thresholds are set in firmware." if self.supports_start
                        else "The stop threshold is set in firmware.")
@@ -357,15 +384,18 @@ class ThresholdBackend(Backend):
             current_end = read_int(end_path, 100)
             current_start = read_int(start_path) if start_path else None
 
-            if start_path is None:
+            if start_path is None or self.fixed_gap:
+                # No start threshold, or one the EC derives from end by itself (MSI).
+                # Never write start there: on msi-ec that moves end to start + 10, so
+                # "limit off" would otherwise stop charging at 10%.
                 if current_end != end:
-                    write(end_path, end)
+                    write_threshold(end_path, end)
                 continue
 
             if start is None:
                 # Limit off: charging must resume whenever below full.
                 if current_end != end:
-                    write(end_path, end)
+                    write_threshold(end_path, end)
                 if current_start is not None and current_start > 50:
                     self._write_low_start(start_path)
                 continue
@@ -374,11 +404,11 @@ class ThresholdBackend(Backend):
                 continue
             # The kernel rejects start >= end, so order the writes.
             if start >= current_end:
-                write(end_path, end)
+                write_threshold(end_path, end)
                 write(start_path, start)
             else:
                 write(start_path, start)
-                write(end_path, end)
+                write_threshold(end_path, end)
 
     @staticmethod
     def _write_low_start(path):
@@ -560,6 +590,8 @@ def target(config, backend):
     end = backend.snap(config["end"])
     if end >= 100:
         return 100, None
+    if backend.fixed_gap:
+        return end, max(end - backend.fixed_gap, 0)
     start = config.get("start")
     if start is None or start > end - backend.min_gap:
         start = end - max(5, backend.min_gap)

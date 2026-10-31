@@ -82,6 +82,71 @@ class DellTests(unittest.TestCase):
         self.assertEqual(core.target(dict(config, end=55, start=20), backend), (55, 50))
 
 
+class VendorTests(unittest.TestCase):
+    def backend_for(self, vendor):
+        original = core.dmi
+        core.dmi = lambda field: vendor
+        try:
+            return core.ThresholdBackend([], [])
+        finally:
+            core.dmi = original
+
+    def test_lg_and_toshiba_only_80(self):
+        for vendor in ("LG Electronics", "TOSHIBA", "Dynabook Inc."):
+            backend = self.backend_for(vendor)
+            self.assertFalse(backend.continuous, vendor)
+            self.assertEqual(backend.snap(85), 80)
+            self.assertEqual(backend.snap(60), 80)
+            self.assertEqual(core.target(dict(core.DEFAULT_CONFIG, end=85), backend)[0], 80)
+
+    def test_msi_start_follows_end(self):
+        backend = self.backend_for("Micro-Star International Co., Ltd.")
+        self.assertEqual(core.target(dict(core.DEFAULT_CONFIG, end=85, start=80), backend), (85, 75))
+
+    def test_msi_never_writes_start(self):
+        """Emulate msi-ec: one EC value; start = value - 10; writing start sets value = start + 10."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bat = os.path.join(tmp, "BAT1")
+            make(bat, "type", "Battery")
+            end_path = make(bat, "charge_control_end_threshold", 100)
+            start_path = make(bat, "charge_control_start_threshold", 90)
+            original = core.write
+
+            def ec_write(path, value):
+                ec = int(value) + 10 if path == start_path else int(value)
+                with open(end_path, "w") as f:
+                    f.write(f"{ec}\n")
+                with open(start_path, "w") as f:
+                    f.write(f"{ec - 10}\n")
+
+            core.write = ec_write
+            try:
+                backend = self.backend_for("Micro-Star International Co., Ltd.")
+                backend.threshold_bats = [bat]
+                for config in (dict(core.DEFAULT_CONFIG, end=80), dict(core.DEFAULT_CONFIG, limit_enabled=False)):
+                    for _ in range(3):      # several daemon cycles
+                        backend.ensure(*core.target(config, backend))
+                    expected = 80 if config["limit_enabled"] else 100
+                    self.assertEqual(core.read_int(end_path), expected)
+            finally:
+                core.write = original
+
+    def test_rejected_value_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = make(tmp, "charge_control_end_threshold", 100)
+            original = core.write
+
+            def reject(p, value):
+                raise OSError(22, "Invalid argument")
+
+            core.write = reject
+            try:
+                with self.assertRaisesRegex(OSError, "does not accept 85%"):
+                    core.write_threshold(path, 85)
+            finally:
+                core.write = original
+
+
 class CalibrationTests(unittest.TestCase):
     def test_stop_reasons(self):
         backend = core.AcerBackend([])
@@ -167,6 +232,19 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual((backend.limit(), backend.start()), (100, None))
         finally:
             core.load_config = original
+
+
+class AdapterTests(unittest.TestCase):
+    def test_ac_inferred_from_status(self):
+        original_bats, original_ac, original_info = core.batteries, core.ac_online, core.battery_info
+        try:
+            core.batteries = lambda: ["/x/BAT0"]
+            core.ac_online = lambda: None
+            for status, expected in (("Charging", True), ("Discharging", False), ("Unknown", None)):
+                core.battery_info = lambda bat, s=status: {"status": s, "name": "BAT0"}
+                self.assertEqual(core.combined_info()["ac"], expected, status)
+        finally:
+            core.batteries, core.ac_online, core.battery_info = original_bats, original_ac, original_info
 
 
 class FullTests(unittest.TestCase):

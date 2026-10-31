@@ -411,13 +411,26 @@ class Window(Adw.ApplicationWindow):
         self.refresh_charts()
         self.timer = GLib.timeout_add_seconds(3, self._tick)
         self.connect("close-request", self._on_close)
+        self.connect("notify::visible", self._on_visible)
         self.stack.connect("notify::visible-child-name", self._on_page)
 
     def _on_page(self, *_):
         # The monitor samples /proc every 2 s, so it only runs while it's on screen.
-        self.monitor_page.set_active(self.stack.get_visible_child_name() == "monitor")
+        self.monitor_page.set_active(self.get_visible() and self.stack.get_visible_child_name() == "monitor")
+
+    def _on_visible(self, *_):
+        if self.get_visible():
+            self.refresh()
+            self.refresh_charts()
+        self._on_page()
 
     def _on_close(self, *_):
+        if self.app.prefs["background"]:
+            # Hide and reuse. A destroyed window is never freed: its widgets' signal
+            # handlers refer back to it through GTK, a cycle Python's collector can't
+            # see, so every reopen from the tray leaked about 7 MB.
+            self.set_visible(False)
+            return True
         GLib.source_remove(self.timer)
         self.monitor_page.set_active(False)
         self.app.window = None
@@ -933,7 +946,8 @@ class Window(Adw.ApplicationWindow):
                 self.scale.set_range(max(40, desc["min_end"]), 100)
                 self.scale.set_value(config["end"])
                 self.fixed_row.set_visible(False)
-                self.start_row.set_visible(desc["supports_start"])
+                # MSI derives the resume level from the limit itself.
+                self.start_row.set_visible(desc["supports_start"] and not desc["fixed_gap"])
                 self.start_row.set_sensitive(enabled)
                 self.start_range = (max(10, desc["min_start"]), desc["min_gap"])
                 self._set_start_range(config["end"])
@@ -1276,8 +1290,6 @@ class App(Adw.Application):
     def _hide(self, *_):
         if self.window:
             self.window.close()
-        if not self.prefs["background"]:
-            self.quit()
 
     def set_pref(self, key, value):
         self.prefs[key] = value
@@ -1402,8 +1414,7 @@ class App(Adw.Application):
 
     def _watch(self):
         if self.tray:
-            self.tray.sample()
-            self.tray.update()
+            self.tray.update()      # battery icon and label; the monitor samples on demand
         info = core.combined_info()
         if not info or info["capacity"] is None:
             return GLib.SOURCE_CONTINUE

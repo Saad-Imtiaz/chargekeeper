@@ -17,17 +17,32 @@ from . import core
 
 SS_COMMAND = ["ss", "-tinpH"]
 
-# Friendly names for hwmon chips: (label, kind).
-CHIPS = {
-    "coretemp": ("CPU", "cpu"), "k10temp": ("CPU", "cpu"), "zenpower": ("CPU", "cpu"),
-    "acpitz": ("Motherboard (ACPI)", "board"), "nvme": ("SSD", "storage"), "drivetemp": ("Disk", "storage"),
-    "amdgpu": ("GPU", "gpu"), "nouveau": ("GPU", "gpu"), "radeon": ("GPU", "gpu"),
-    "iwlwifi": ("Wi-Fi", "wifi"), "dell_smm": ("Motherboard", "board"), "thinkpad": ("Motherboard", "board"),
-    "asus_ec_sensors": ("Motherboard", "board"),
-}
-# Super I/O and chipset sensors that read the board itself, best first.
-BOARD_PREFIXES = ("nct", "it8", "f71", "w83", "asus", "dell_smm", "thinkpad", "pch_", "acpitz")
-CPU_LABELS = ("Package id 0", "Tctl", "Tdie", "CPU")
+# hwmon chips whose readings all measure one thing: name prefix -> (label, kind).
+CHIPS = (
+    ("coretemp", "CPU", "cpu"), ("k10temp", "CPU", "cpu"), ("zenpower", "CPU", "cpu"),
+    ("acpitz", "Motherboard (ACPI)", "board"), ("pch_", "Chipset", "board"),
+    ("nvme", "SSD", "storage"), ("drivetemp", "Disk", "storage"),
+    ("amdgpu", "GPU", "gpu"), ("nouveau", "GPU", "gpu"), ("radeon", "GPU", "gpu"),
+    ("iwlwifi", "Wi-Fi", "wifi"), ("mt79", "Wi-Fi", "wifi"), ("ath1", "Wi-Fi", "wifi"),
+)
+# Super I/O chips (desktop-style boards); their readings are labelled per sensor.
+SUPERIO = ("nct", "it8", "f71", "w83", "asus_ec_sensors")
+# Embedded-controller chips mix CPU, GPU, memory and ambient readings (Dell dell_smm,
+# Framework cros_ec, HP hp_wmi, ThinkPad thinkpad, ...); each reading is classified by
+# its label instead. Words are matched against the lowercased label, first match wins.
+LABEL_KINDS = (
+    (("gpu", "video", "vga"), "gpu"),
+    (("cpu", "package", "core", "tdie", "tctl", "soc"), "cpu"),
+    (("battery", "batt"), "battery"),
+    (("ssd", "nvme", "drive", "disk"), "storage"),
+    (("ambient", "sodimm", "dimm", "ddr", "memory", "board", "systin", "auxtin", "system",
+      "local", "chipset", "pch", "skin", "other"), "board"),
+)
+# ARM laptops name CPU and GPU thermal zones by function (cpu0_thermal, gpuss1_thermal).
+NAME_KINDS = ((("cpu", "cluster", "soc"), "CPU", "cpu"), (("gpu",), "GPU", "gpu"))
+# Best CPU reading first. Tdie before Tctl: on many Ryzen parts Tctl carries a +20-27 °C
+# offset meant for fan control.
+CPU_LABELS = ("Package id 0", "Tdie", "Tctl", "CPU")
 FRIENDLY_LABELS = {"Package id 0": "CPU package", "Tctl": "CPU control (Tctl)", "Tdie": "CPU die",
                    "Composite": "Drive", "edge": "GPU edge", "junction": "GPU hotspot"}
 
@@ -112,10 +127,17 @@ class Monitor:
 
     @staticmethod
     def _cpu_times():
-        fields = (core.read("/proc/stat") or "cpu 0").splitlines()[0].split()[1:]
-        values = [int(v) for v in fields[:8]]
+        """(total ticks, idle ticks, online CPUs) from /proc/stat.
+
+        guest/guest_nice are already part of user/nice, so only the first 8 fields count.
+        The CPU count comes from the same file so per-app shares use the same base as the
+        total; os.cpu_count() would also count CPUs the kernel has switched off.
+        """
+        lines = (core.read("/proc/stat") or "cpu 0").splitlines()
+        values = [int(v) for v in lines[0].split()[1:9]]
         idle = values[3] + (values[4] if len(values) > 4 else 0)
-        return sum(values), idle
+        online = sum(1 for line in lines[1:] if line.startswith("cpu") and line[3:4].isdigit())
+        return sum(values), idle, max(online, 1)
 
     @staticmethod
     def _disk_bytes():
@@ -140,7 +162,12 @@ class Monitor:
         return down, up
 
     def _processes(self):
-        """{pid: (name, cpu_ticks, rss_bytes, io_bytes or None, started)}"""
+        """{pid: (name, cpu_ticks, private_bytes, io_bytes or None, started)}
+
+        Memory is resident minus shared pages (statm), as GNOME System Monitor shows it.
+        Summing plain RSS counted shared libraries once per process, which made
+        multi-process apps look 2-3x bigger (Firefox: 1.4 GB instead of 0.5 GB).
+        """
         out = {}
         for entry in os.scandir("/proc"):
             if not entry.name.isdigit():
@@ -152,8 +179,11 @@ class Monitor:
             comm = stat[stat.find("(") + 1:close]
             fields = stat[close + 2:].split()
             try:
-                ppid, ticks = int(fields[1]), int(fields[11]) + int(fields[12])
-                started, rss = int(fields[19]), int(fields[21]) * self.page
+                ppid, ticks, started = int(fields[1]), int(fields[11]) + int(fields[12]), int(fields[19])
+                rss = 0
+                if int(fields[21]):     # kernel threads have no memory; skip the extra read
+                    resident, shared = (core.read(f"/proc/{entry.name}/statm") or "0 0 0").split()[1:3]
+                    rss = max(0, int(resident) - int(shared)) * self.page
             except (IndexError, ValueError):
                 continue
             pid = int(entry.name)
@@ -172,7 +202,7 @@ class Monitor:
     def sample(self):
         """One reading. Rates and percentages need two calls; the first returns zeros."""
         now = time.monotonic()
-        total, idle = self._cpu_times()
+        total, idle, self.ncpu = self._cpu_times()
         disk = self._disk_bytes()
         net = self._net_bytes()
         procs = self._processes()
@@ -273,19 +303,27 @@ def top(values, n=3):
 # --- temperatures ------------------------------------------------------------
 
 def _chip_label(hwmon, name):
-    label, kind = CHIPS.get(name, (None, None))
-    if label is None:
-        if name.startswith("pch_"):
-            label, kind = "Chipset", "board"
-        elif name.startswith(BOARD_PREFIXES[:5]):
-            label, kind = "Motherboard", "board"
-        else:
-            label, kind = name.replace("_", " "), "other"
-    if kind == "storage":
-        model = (core.read(hwmon + "/device/model") or "").strip()
-        if model:
-            label = model
-    return label, kind
+    """(chip label, kind) for a whole hwmon chip; kind None means classify per reading."""
+    for prefix, label, kind in CHIPS:
+        if name.startswith(prefix):
+            if kind == "storage":
+                label = (core.read(hwmon + "/device/model") or "").strip() or label
+            return label, kind
+    if name.startswith(SUPERIO):
+        return "Motherboard", None
+    for words, label, kind in NAME_KINDS:
+        if any(w in name.lower() for w in words):
+            return label, kind
+    return name.replace("_", " "), None
+
+
+def classify(label):
+    """Kind of a single reading from its label, for mixed chips."""
+    text = label.lower()
+    for words, kind in LABEL_KINDS:
+        if any(w in text for w in words):
+            return kind
+    return "other"
 
 
 _slow_cache = {}
@@ -311,15 +349,31 @@ def sensors():
 
 def _read_chip(hwmon, name, first_only=False):
     out = []
-    chip, kind = _chip_label(hwmon, name)
+    chip, chip_kind = _chip_label(hwmon, name)
     paths = sorted(glob.glob(hwmon + "/temp*_input"), key=lambda p: int(re.sub(r"\D", "", os.path.basename(p)) or 0))
     for path in paths[:1] if first_only else paths:
         milli = core.read_int(path)
         if milli is None or not -40000 < milli < 150000:
             continue
         label = core.read(path.replace("_input", "_label")) or ""
+        kind = chip_kind or classify(label)
         out.append({"chip": chip, "name": name, "label": label, "kind": kind, "value": milli / 1000})
     return out
+
+
+def pick_board(all_sensors):
+    """Best motherboard reading: Super I/O, then labelled EC readings, then chipset, then ACPI."""
+    boards = [s for s in all_sensors if s["kind"] == "board"]
+    ranked = (
+        [s for s in boards if s["name"].startswith(SUPERIO)],
+        [s for s in boards if not s["name"].startswith(("pch_", "acpitz"))],
+        [s for s in boards if s["name"].startswith("pch_")],
+        [s for s in boards if s["name"].startswith("acpitz")],
+    )
+    for group in ranked:
+        if group:
+            return group[0]
+    return None
 
 
 def highlights(all_sensors, battery_temp):
@@ -336,13 +390,13 @@ def highlights(all_sensors, battery_temp):
     cpu = pick("cpu", CPU_LABELS)
     tiles.append(("cpu", "CPU", cpu["value"] if cpu else None,
                   FRIENDLY_LABELS.get(cpu["label"], cpu["label"] or cpu["chip"]) if cpu else "No sensor found"))
-    tiles.append(("battery", "Battery", battery_temp,
-                  "Battery sensor" if battery_temp is not None else "Not reported"))
-    board = None
-    for prefix in BOARD_PREFIXES:
-        board = next((s for s in all_sensors if s["name"].startswith(prefix)), None)
-        if board:
-            break
+    source = "Battery sensor"
+    if battery_temp is None:
+        # Some EC drivers (Framework cros_ec, Dell) report the pack temperature as a sensor.
+        reading = pick("battery")
+        battery_temp, source = (reading["value"], f"{reading['chip']} · {reading['label']}") if reading else (None, "")
+    tiles.append(("battery", "Battery", battery_temp, source if battery_temp is not None else "Not reported"))
+    board = pick_board(all_sensors)
     tiles.append(("board", "Motherboard", board["value"] if board else None,
                   (board["chip"] + (f" · {board['label']}" if board["label"] else "")) if board else "No sensor found"))
     storage = pick("storage", ("Composite",))

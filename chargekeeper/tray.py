@@ -6,7 +6,6 @@ AppIndicator extension; KDE, Cinnamon, XFCE and others support it natively.
 """
 
 import os
-import subprocess
 import time
 
 from gi.repository import Gio, GLib
@@ -105,6 +104,15 @@ MENU_XML = """
 ID_STATUS, ID_HEADER, ID_NO_LIMIT, ID_FULL, ID_OPEN, ID_QUIT = 1, 2, 3, 4, 5, 6
 ID_SEPARATORS = (90, 91, 92, 93)
 LIMIT_BASE = 100
+
+# System monitor timing. Nothing is sampled while the menu is closed. Opening it
+# measures straight away when the last reading is recent, otherwise it starts a
+# new measurement and fills in the numbers a second later. While the menu stays
+# open the numbers refresh every LIVE_SECONDS.
+FRESH_SECONDS = 10
+FIRST_READING_MS = 1000
+LIVE_SECONDS = 2
+LIVE_LIMIT_SECONDS = 300      # stop if the host never reports the menu closing
 # System monitor section: each row's submenu holds its top apps at row id + 1..3.
 ID_MON_HEADER, ID_MEASURING = 300, 301
 ID_CPU, ID_MEM, ID_DISK, ID_NET, ID_TEMPS, ID_OPEN_MONITOR = 310, 320, 330, 340, 350, 360
@@ -167,7 +175,14 @@ def status_line(info, backend, config):
 class Tray:
     def __init__(self, app):
         self.app = app
-        self.bus = app.get_dbus_connection()
+        # A connection of our own: method calls are answered from a message filter on it
+        # rather than with register_object(). With GLib < 2.84 (Ubuntu 24.04 has 2.80),
+        # PyGObject's register_object leaks every incoming call (about 4 KB each), and
+        # the shell calls the menu many times a day.
+        self.bus = Gio.DBusConnection.new_for_address_sync(
+            Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION),
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None)
         self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
         self.revision = 1
         self.items = {}           # id -> props
@@ -175,10 +190,8 @@ class Tray:
         self.handlers = {}        # id -> callable
         self.icon, self.label, self.tooltip = "battery-missing-symbolic", "", ""
         self.host_available = False
-        self.registrations = []
-        # Readings for the System monitor section. A cheap baseline is taken on every
-        # 30 s refresh so that opening the menu can show rates since then; temperatures
-        # are only read when the menu opens (SSD sensors wake the drive).
+        # Readings for the System monitor section, taken only around menu openings
+        # (see FRESH_SECONDS); temperatures likewise, since SSD sensors wake the drive.
         self.monitor = monitor.Monitor()
         self.stats = None
         self.stats_time = 0
@@ -186,15 +199,17 @@ class Tray:
         self.temps = []
         self.app_icons = {}
         self.menu_open = False
+        self.first_pending = False    # "Measuring…" is showing; its replacement may rebuild
         self.layout_pending = False
-        self.sample()
+        self.live_source = 0
+        self.live_ticks = 0
+        self.ss_busy = False
 
-        item_info = Gio.DBusNodeInfo.new_for_xml(ITEM_XML).interfaces[0]
-        menu_info = Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0]
-        self.registrations = [
-            self.bus.register_object(ITEM_PATH, item_info, self._item_call, self._item_property, None),
-            self.bus.register_object(MENU_PATH, menu_info, self._menu_call, self._menu_property, None),
-        ]
+        self.interfaces = {
+            ITEM_PATH: Gio.DBusNodeInfo.new_for_xml(ITEM_XML).interfaces[0],
+            MENU_PATH: Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0],
+        }
+        self.filter_id = self.bus.add_filter(self._filter)
         self.own_id = Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.NONE,
                                                       None, None)
         self.watch_id = Gio.bus_watch_name_on_connection(self.bus, WATCHER, Gio.BusNameWatcherFlags.NONE,
@@ -202,11 +217,11 @@ class Tray:
         self.update()
 
     def close(self):
+        self._stop_live()
         Gio.bus_unwatch_name(self.watch_id)
         Gio.bus_unown_name(self.own_id)
-        for reg in self.registrations:
-            self.bus.unregister_object(reg)
-        self.registrations = []
+        self.bus.remove_filter(self.filter_id)
+        self.bus.close(None, None, None)
 
     # --- watcher ---
 
@@ -243,21 +258,72 @@ class Tray:
 
     # --- state ---
 
-    def sample(self, temperatures=False):
-        if time.monotonic() - self.stats_time >= 1.5:
-            result = self.monitor.sample()
-            if self.monitor.prev and self.stats_time:
-                self.stats = result
-            self.stats_time = time.monotonic()
-            try:
-                out = subprocess.run(monitor.SS_COMMAND, capture_output=True, text=True, timeout=2).stdout
-                self.net_apps = self.monitor.network_apps(out)
-            except (OSError, subprocess.TimeoutExpired):
-                self.net_apps = []
+    def _measure(self, temperatures=False):
+        """Take a reading: rates since the previous one (None for the very first)."""
+        result = self.monitor.sample()
+        self.stats = result if self.stats_time else None
+        self.stats_time = time.monotonic()
+        self._run_ss()
         if temperatures:
             bats = core.batteries()
             battery = core.battery_temperature(bats[0]) if bats else None
             self.temps = monitor.highlights(monitor.sensors(), battery)
+
+    def _run_ss(self):
+        if self.ss_busy:
+            return
+        try:
+            proc = Gio.Subprocess.new(monitor.SS_COMMAND,
+                                      Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error:
+            return
+        self.ss_busy = True
+        proc.communicate_utf8_async(None, None, self._ss_done)
+
+    def _ss_done(self, proc, result):
+        self.ss_busy = False
+        try:
+            _ok, out, _err = proc.communicate_utf8_finish(result)
+        except GLib.Error:
+            return
+        self.net_apps = self.monitor.network_apps(out)
+
+    def menu_opening(self):
+        """Called from AboutToShow on the root menu."""
+        age = time.monotonic() - self.stats_time
+        if not self.stats_time or age > FRESH_SECONDS:
+            # Too old to be meaningful: start a new measurement and fill it in shortly.
+            self.stats, self.stats_time = None, 0
+            self._measure(temperatures=True)
+            self.first_pending = True
+            GLib.timeout_add(FIRST_READING_MS, self._first_reading)
+        elif age >= 0.5:
+            self._measure(temperatures=True)
+
+    def _first_reading(self):
+        self._measure()
+        self.update()
+        self.first_pending = False
+        return GLib.SOURCE_REMOVE
+
+    def _start_live(self):
+        if not self.live_source:
+            self.live_ticks = 0
+            self.live_source = GLib.timeout_add_seconds(LIVE_SECONDS, self._live_tick)
+
+    def _stop_live(self):
+        if self.live_source:
+            GLib.source_remove(self.live_source)
+            self.live_source = 0
+
+    def _live_tick(self):
+        self.live_ticks += 1
+        if not self.menu_open or self.live_ticks * LIVE_SECONDS > LIVE_LIMIT_SECONDS:
+            self.live_source = 0
+            return GLib.SOURCE_REMOVE
+        self._measure(temperatures=self.live_ticks % 2 == 0)
+        self.update()
+        return GLib.SOURCE_CONTINUE
 
     def _icon_for(self, name):
         if name not in self.app_icons:
@@ -288,6 +354,9 @@ class Tray:
             self._emit_item("NewToolTip")
 
         items, children, handlers = self._build_menu(info, backend, config, tooltip)
+        # Replacing "Measuring…" right after opening may rebuild the menu; any later
+        # structural change waits for it to close.
+        opening = opening or self.first_pending
         if children != self.children and self.menu_open and not opening:
             # A new layout rebuilds the open menu, collapsing submenus and moving rows
             # under the pointer; wait until it closes.
@@ -431,8 +500,62 @@ class Tray:
     def _emit_item(self, signal, params=None):
         self._emit(ITEM_PATH, "org.kde.StatusNotifierItem", signal, params)
 
-    def _item_property(self, _bus, _sender, _path, _iface, name):
-        values = {
+    def _filter(self, _bus, message, incoming):
+        """Runs on GDBus's worker thread: hand our method calls to the main loop."""
+        if (incoming and message.get_message_type() == Gio.DBusMessageType.METHOD_CALL
+                and message.get_path() in self.interfaces):
+            GLib.idle_add(self._dispatch, message)
+            return None
+        return message
+
+    def _dispatch(self, message):
+        path, iface, method = message.get_path(), message.get_interface(), message.get_member()
+        body = message.get_body()
+        args = body.unpack() if body is not None else ()
+        try:
+            if iface == "org.freedesktop.DBus.Properties":
+                reply = self._properties(path, method, args)
+            elif iface == "org.freedesktop.DBus.Introspectable" or method == "Introspect":
+                reply = GLib.Variant("(s)", (self._introspect(path),))
+            elif iface == "org.freedesktop.DBus.Peer":
+                machine = (core.read("/etc/machine-id") or "").strip()
+                reply = GLib.Variant("(s)", (machine,)) if method == "GetMachineId" else None
+            elif path == ITEM_PATH:
+                reply = self._item_method(method)
+            else:
+                reply = self._menu_method(method, args)
+        except LookupError as exc:
+            error = Gio.DBusMessage.new_method_error_literal(
+                message, "org.freedesktop.DBus.Error.UnknownMethod", str(exc))
+            self.bus.send_message(error, Gio.DBusSendMessageFlags.NONE)
+            return GLib.SOURCE_REMOVE
+        if not message.get_flags() & Gio.DBusMessageFlags.NO_REPLY_EXPECTED:
+            out = Gio.DBusMessage.new_method_reply(message)
+            if reply is not None:
+                out.set_body(reply)
+            self.bus.send_message(out, Gio.DBusSendMessageFlags.NONE)
+        return GLib.SOURCE_REMOVE
+
+    def _introspect(self, path):
+        own = ITEM_XML if path == ITEM_PATH else MENU_XML
+        inner = own.strip().removeprefix("<node>").removesuffix("</node>")
+        return ("<node>" + inner +
+                '<interface name="org.freedesktop.DBus.Properties">'
+                '<method name="Get"><arg type="s" direction="in"/><arg type="s" direction="in"/>'
+                '<arg type="v" direction="out"/></method>'
+                '<method name="GetAll"><arg type="s" direction="in"/><arg type="a{sv}" direction="out"/></method>'
+                '</interface><interface name="org.freedesktop.DBus.Introspectable">'
+                '<method name="Introspect"><arg type="s" direction="out"/></method></interface></node>')
+
+    def _property_values(self, path):
+        if path == MENU_PATH:
+            return {
+                "Version": GLib.Variant("u", 3),
+                "TextDirection": GLib.Variant("s", "ltr"),
+                "Status": GLib.Variant("s", "normal"),
+                "IconThemePath": GLib.Variant("as", []),
+            }
+        return {
             "Category": GLib.Variant("s", "Hardware"),
             "Id": GLib.Variant("s", "chargekeeper"),
             "Title": GLib.Variant("s", "Chargekeeper"),
@@ -448,20 +571,21 @@ class Tray:
             "XAyatanaLabel": GLib.Variant("s", self.label),
             "XAyatanaLabelGuide": GLib.Variant("s", "100%"),
         }
-        return values.get(name)
 
-    def _item_call(self, _bus, _sender, _path, _iface, method, _params, invocation):
+    def _properties(self, path, method, args):
+        values = self._property_values(path)
+        if method == "GetAll":
+            return GLib.Variant("(a{sv})", (values,))
+        if method == "Get" and args[1] in values:
+            return GLib.Variant("(v)", (values[args[1]],))
+        raise LookupError(f"{method} {args[1] if len(args) > 1 else ''}")
+
+    def _item_method(self, method):
         if method in ("Activate", "SecondaryActivate"):
             self.app.activate()
-        invocation.return_value(None)
-
-    def _menu_property(self, _bus, _sender, _path, _iface, name):
-        return {
-            "Version": GLib.Variant("u", 3),
-            "TextDirection": GLib.Variant("s", "ltr"),
-            "Status": GLib.Variant("s", "normal"),
-            "IconThemePath": GLib.Variant("as", []),
-        }.get(name)
+        elif method not in ("ContextMenu", "Scroll"):
+            raise LookupError(method)
+        return None
 
     def _props(self, item_id):
         if item_id == 0:
@@ -486,6 +610,10 @@ class Tray:
     def _click(self, item_id, event):
         if item_id == 0 and event in ("opened", "closed"):
             self.menu_open = event == "opened"
+            if self.menu_open:
+                self._start_live()
+            else:
+                self._stop_live()
             if not self.menu_open and self.layout_pending:
                 self.layout_pending = False
                 GLib.idle_add(lambda: self.update() and False)
@@ -495,38 +623,35 @@ class Tray:
             # Leave the D-Bus call first; the handler may start pkexec or open a window.
             GLib.idle_add(lambda: handler() and False)
 
-    def _menu_call(self, _bus, _sender, _path, _iface, method, params, invocation):
-        args = params.unpack()
+    def _menu_method(self, method, args):
         if method == "GetLayout":
             parent, depth, _names = args
-            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (self.revision, self._layout(parent, depth))))
-        elif method == "GetGroupProperties":
+            return GLib.Variant("(u(ia{sv}av))", (self.revision, self._layout(parent, depth)))
+        if method == "GetGroupProperties":
             ids = args[0] or [0, *self.items]
-            invocation.return_value(GLib.Variant("(a(ia{sv}))", ([(i, self._props(i)) for i in ids],)))
-        elif method == "GetProperty":
+            return GLib.Variant("(a(ia{sv}))", ([(i, self._props(i)) for i in ids],))
+        if method == "GetProperty":
             item_id, name = args
-            value = self._props(item_id).get(name, GLib.Variant("s", ""))
-            invocation.return_value(GLib.Variant("(v)", (value,)))
-        elif method == "Event":
+            return GLib.Variant("(v)", (self._props(item_id).get(name, GLib.Variant("s", "")),))
+        if method == "Event":
             self._click(args[0], args[1])
-            invocation.return_value(None)
-        elif method == "EventGroup":
+            return None
+        if method == "EventGroup":
             for item_id, event, _data, _ts in args[0]:
                 self._click(item_id, event)
-            invocation.return_value(GLib.Variant("(ai)", ([],)))
-        elif method == "AboutToShow":
+            return GLib.Variant("(ai)", ([],))
+        if method == "AboutToShow":
             before = self.revision
             if args[0] == 0:
-                self.sample(temperatures=True)
+                self.menu_opening()
             self.update(opening=True)   # fresh numbers each time the menu opens
-            invocation.return_value(GLib.Variant("(b)", (self.revision != before,)))
-        elif method == "AboutToShowGroup":
+            return GLib.Variant("(b)", (self.revision != before,))
+        if method == "AboutToShowGroup":
             if 0 in args[0]:
-                self.sample(temperatures=True)
+                self.menu_opening()
             self.update(opening=True)
-            invocation.return_value(GLib.Variant("(aiai)", ([], [])))
-        else:
-            invocation.return_error_literal(Gio.dbus_error_quark(), Gio.DBusError.UNKNOWN_METHOD, method)
+            return GLib.Variant("(aiai)", ([], []))
+        raise LookupError(method)
 
 
 def extension_to_enable():

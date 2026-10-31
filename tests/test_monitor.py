@@ -64,6 +64,47 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(monitor.level("cpu", None), "ok")
 
 
+class VendorSensorTests(unittest.TestCase):
+    """Sensor layouts from other manufacturers, classified the way sensors() does."""
+
+    def readings(self, chip_name, labelled):
+        chip, chip_kind = monitor._chip_label("/nonexistent", chip_name)
+        return [{"chip": chip, "name": chip_name, "label": label,
+                 "kind": chip_kind or monitor.classify(label), "value": value}
+                for label, value in labelled]
+
+    def test_dell_smm_mixed_chip(self):
+        sensors = self.readings("dell_smm", [("CPU", 71), ("GPU", 60), ("SODIMM", 44), ("Ambient", 38)])
+        sensors += self.readings("acpitz", [("", 50)])
+        tiles = {t[0]: t for t in monitor.highlights(sensors, 30.0)}
+        self.assertEqual(tiles["cpu"][2], 71)
+        self.assertEqual(tiles["board"][2], 44)       # an EC board reading, never the CPU
+        self.assertEqual(tiles["gpu"][2], 60)
+
+    def test_thinkpad_unlabelled_cpu_is_not_board(self):
+        sensors = self.readings("thinkpad", [("", 68), ("", 40)]) + self.readings("acpitz", [("", 45)])
+        sensors += self.readings("coretemp", [("Package id 0", 66)])
+        tiles = {t[0]: t for t in monitor.highlights(sensors, None)}
+        self.assertEqual(tiles["board"][2], 45)
+        self.assertEqual(tiles["cpu"][2], 66)
+
+    def test_ryzen_prefers_tdie(self):
+        sensors = self.readings("k10temp", [("Tctl", 80), ("Tdie", 60)])
+        self.assertEqual(monitor.highlights(sensors, None)[0][2], 60)
+
+    def test_framework_cros_ec_battery_fallback(self):
+        sensors = self.readings("cros_ec", [("cpu_f75303@4d", 55), ("battery", 31), ("local_f75303@4d", 40)])
+        tiles = {t[0]: t for t in monitor.highlights(sensors, None)}
+        self.assertEqual(tiles["battery"][2], 31)
+        self.assertEqual(tiles["board"][2], 40)
+
+    def test_arm_thermal_zone_names(self):
+        sensors = self.readings("cpu0_thermal", [("", 52)]) + self.readings("gpuss0_thermal", [("", 47)])
+        tiles = {t[0]: t for t in monitor.highlights(sensors, None)}
+        self.assertEqual(tiles["cpu"][2], 52)
+        self.assertEqual(tiles["gpu"][2], 47)
+
+
 class FormatTests(unittest.TestCase):
     def test_bytes(self):
         self.assertEqual(monitor.fmt_bytes(512), "512 B")
