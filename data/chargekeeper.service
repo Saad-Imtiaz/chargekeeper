@@ -5,6 +5,8 @@ After=systemd-modules-load.service
 [Service]
 Type=simple
 ExecStart=/usr/lib/chargekeeper/chargekeeper-helper daemon
+# If the service stops or crashes, never leave charging paused with nobody to resume it.
+ExecStopPost=/usr/lib/chargekeeper/chargekeeper-helper release
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=chargekeeper

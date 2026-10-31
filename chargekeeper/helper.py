@@ -8,7 +8,10 @@ import time
 
 from . import core
 
-POLL_SECONDS = 10
+# Firmware thresholds hold on their own, so the daemon only checks for drift.
+# The software limit is enforced by the daemon itself and needs a faster loop.
+POLL_SECONDS = 30
+SOFTWARE_POLL_SECONDS = 10
 LOG_SECONDS = 60
 
 
@@ -78,6 +81,10 @@ def cmd_apply(args):
     core.apply(core.detect(), core.load_config())
 
 
+def cmd_release(args):
+    core.release(core.detect())
+
+
 def write_state(state):
     os.makedirs(os.path.dirname(core.STATE_PATH), exist_ok=True)
     tmp = core.STATE_PATH + ".tmp"
@@ -104,6 +111,9 @@ def cmd_daemon(args):
                 config["top_up"] = False
                 core.save_config(config)
 
+            if core.behaviour_override(config, info):
+                core.save_config(config)
+
             # Re-applied every cycle: covers boot, resume and firmware that
             # forgets its thresholds, and only writes on mismatch.
             core.apply(backend, config)
@@ -126,7 +136,7 @@ def cmd_daemon(args):
             })
         except OSError as exc:
             print(f"Cannot write state: {exc}", file=sys.stderr, flush=True)
-        time.sleep(POLL_SECONDS)
+        time.sleep(SOFTWARE_POLL_SECONDS if backend and backend.software else POLL_SECONDS)
 
 
 def main(argv=None):
@@ -152,6 +162,7 @@ def main(argv=None):
     e.set_defaults(func=cmd_epp)
 
     sub.add_parser("apply").set_defaults(func=cmd_apply)
+    sub.add_parser("release").set_defaults(func=cmd_release)
     sub.add_parser("daemon").set_defaults(func=cmd_daemon)
 
     args = parser.parse_args(argv)

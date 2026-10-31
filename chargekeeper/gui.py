@@ -306,6 +306,8 @@ class Window(Adw.ApplicationWindow):
         self.syncing = False
         self.pending = {}
         self.pending_source = 0
+        self.inflight = False
+        self.hint_ids = None
         self.backend = None
         self.history_range = RANGES[1][1]
         self.last_chart = 0
@@ -354,6 +356,9 @@ class Window(Adw.ApplicationWindow):
         self.toasts.add_toast(Adw.Toast(title=text, timeout=4))
 
     def _tick(self):
+        # Minimized or hidden windows don't need live numbers; skip the sysfs reads.
+        if self.is_suspended() or not self.get_mapped():
+            return GLib.SOURCE_CONTINUE
         self.refresh()
         if time.time() - self.last_chart > 60:
             self.refresh_charts()
@@ -623,7 +628,7 @@ class Window(Adw.ApplicationWindow):
             self.banner.set_revealed(False)
 
         self._refresh_overview(info, backend, config, effective)
-        if not self.pending:
+        if not self.pending and not self.inflight:
             self._refresh_charging(backend, desc, config, limit)
         self._refresh_health(info, backend, config)
         self._refresh_system(backend, state)
@@ -637,7 +642,7 @@ class Window(Adw.ApplicationWindow):
         cap = info["capacity"]
         status = info["status"]
         power = info["power"]
-        remaining = core.time_remaining(info, limit)
+        remaining = core.time_remaining(info, 100 if config["top_up"] else limit)
         marker = limit if limit < 100 else None
         if not backend.available and self.app.prefs["notify_unplug"]:
             marker = self.app.prefs["reminder_level"]
@@ -700,16 +705,20 @@ class Window(Adw.ApplicationWindow):
             self.backend_icon.set_from_icon_name(
                 "emblem-ok-symbolic" if backend.available else "dialog-warning-symbolic")
 
+            # Rebuild only on change; recreating rows every tick forced a relayout each time.
             hints = core.hints()
-            for row in self.hint_rows:
-                self.hint_group.remove(row)
-            self.hint_rows = []
-            for hint in hints:
-                row = Adw.ActionRow(title=hint["title"], subtitle=hint["body"], subtitle_lines=0)
-                row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
-                self.hint_group.add(row)
-                self.hint_rows.append(row)
-            self.hint_group.set_visible(bool(hints))
+            ids = [h["id"] for h in hints]
+            if ids != self.hint_ids:
+                self.hint_ids = ids
+                for row in self.hint_rows:
+                    self.hint_group.remove(row)
+                self.hint_rows = []
+                for hint in hints:
+                    row = Adw.ActionRow(title=hint["title"], subtitle=hint["body"], subtitle_lines=0)
+                    row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+                    self.hint_group.add(row)
+                    self.hint_rows.append(row)
+                self.hint_group.set_visible(bool(hints))
 
             available = backend.available
             enabled = config["limit_enabled"]
@@ -777,6 +786,17 @@ class Window(Adw.ApplicationWindow):
             self.syncing = False
 
     def _refresh_health(self, info, backend, config):
+        if info:
+            self.v_model.set_label(info["model"] or "—")
+            self.v_maker.set_label(info["manufacturer"] or "—")
+            self.v_tech.set_label(info["technology"] or "—")
+            if info["voltage"]:
+                design = f" (minimum {info['voltage_design']:.1f} V)" if info["voltage_design"] else ""
+                self.v_voltage.set_label(f"{info['voltage']:.2f} V{design}")
+            else:
+                self.v_voltage.set_label("—")
+            cycles = info["cycle_count"]
+            self.v_cycles.set_label(str(cycles) if cycles else "Not reported by firmware")
         if not info or info["health"] is None:
             self.health_ring.update(None, "—", "health", BLUE)
             self.health_note.set_label("The battery doesn't report its capacity.")
@@ -797,13 +817,6 @@ class Window(Adw.ApplicationWindow):
         self.v_full.set_label(f"{info['energy_full']:.1f} Wh")
         self.v_design.set_label(f"{info['energy_design']:.1f} Wh")
         self.v_wear.set_label(f"{max(0, 100 - health):.0f}%")
-        cycles = info["cycle_count"]
-        self.v_cycles.set_label(str(cycles) if cycles else "Not reported by firmware")
-        self.v_model.set_label(info["model"] or "—")
-        self.v_maker.set_label(info["manufacturer"] or "—")
-        self.v_tech.set_label(info["technology"] or "—")
-        if info["voltage"]:
-            self.v_voltage.set_label(f"{info['voltage']:.2f} V (minimum {info['voltage_design']:.1f} V)")
 
     def _refresh_system(self, backend, state):
         ppd = self.app.ppd()
@@ -883,22 +896,32 @@ class Window(Adw.ApplicationWindow):
 
     def _flush(self):
         self.pending_source = 0
+        if self.inflight:
+            # One pkexec at a time; _after_change sends what queued up meanwhile.
+            return GLib.SOURCE_REMOVE
+        changes, self.pending = self.pending, {}
         args = []
-        for key, value in self.pending.items():
+        for key, value in changes.items():
             if isinstance(value, bool):
                 value = "on" if value else "off"
             args += [f"--{key}", str(value)]
+        self.inflight = True
         self.app.run_helper(["set", *args], self._after_change)
         return GLib.SOURCE_REMOVE
 
     def _after_change(self, ok):
-        self.pending = {}
+        self.inflight = False
+        if self.pending and not self.pending_source:
+            self._flush()
+            return
         self.refresh()
         self.refresh_charts()
 
     def _on_limit_switch(self, row, _pspec):
         if not self.syncing:
             self.scale_row.set_sensitive(row.get_active())
+            self.start_row.set_sensitive(row.get_active())
+            self.fixed_row.set_sensitive(row.get_active())
             self._queue(**{"limit-enabled": row.get_active(), "top-up": False})
 
     def _on_scale(self, scale, _pspec=None):
@@ -1010,7 +1033,9 @@ class App(Adw.Application):
         sync_autostart(self.prefs["background"])
         self.set_background(self.prefs["background"])
         GLib.timeout_add_seconds(30, self._watch)
-        GLib.idle_add(self._watch)
+        # One immediate check. An idle callback that returns SOURCE_CONTINUE runs again
+        # straight away, which spun a CPU core re-reading the battery nonstop.
+        GLib.idle_add(lambda: self._watch() and GLib.SOURCE_REMOVE)
 
     def do_activate(self):
         if self.start_hidden:

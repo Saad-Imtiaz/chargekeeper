@@ -37,7 +37,10 @@ the limit off first.
 - **History charts** of charge level (with plugged-in periods) and power draw: 6 h, 24 h, 7 days.
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
 - **Power**: power-profiles-daemon mode, firmware platform profile, CPU energy preference.
-- **Re-applies settings** every 10 s and after resume, for firmware that forgets them.
+- **Re-applies settings** every 30 s (10 s for the software limit) and after resume, for firmware
+  that forgets them.
+- **Safety**: "pause charging" and "run on battery" switch back to normal charging when the
+  battery drops to 20% or the charger is unplugged, and when the service stops.
 - **Diagnostics**: detects missing drivers and conflicting TLP thresholds, copies a report.
 
 ## CLI

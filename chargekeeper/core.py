@@ -38,6 +38,10 @@ DEFAULT_CONFIG = {
 
 HISTORY_KEEP_LINES = 14 * 24 * 60
 
+# Below this level "pause charging" and "run on battery" are dropped so a
+# forgotten setting can never run a plugged-in laptop flat.
+SAFETY_FLOOR = 20
+
 
 # --- sysfs helpers ---------------------------------------------------------
 
@@ -441,10 +445,12 @@ class SoftwareBackend(Backend):
     software = True
 
     def limit(self):
-        return load_config().get("end")
+        wanted = target(load_config(), self)
+        return wanted[0] if wanted else 100
 
     def start(self):
-        return load_config().get("start")
+        wanted = target(load_config(), self)
+        return wanted[1] if wanted else None
 
 
 def detect():
@@ -543,9 +549,32 @@ def apply(backend, config):
             backend.set_charge_type(config["charge_type"])
 
 
+def behaviour_override(config, info):
+    """Reset pause/discharge to normal when the battery is low or the charger is unplugged.
+
+    Returns True when config was changed and should be saved.
+    """
+    if config["behaviour"] == "auto" or not info:
+        return False
+    low = info["capacity"] is not None and info["capacity"] <= SAFETY_FLOOR
+    if low or info["ac"] is False:
+        config["behaviour"] = "auto"
+        return True
+    return False
+
+
+def release(backend):
+    """Let the battery charge normally; used when the service stops."""
+    if backend.behaviours() and backend.behaviour() != "auto":
+        backend.set_behaviour("auto")
+
+
 def enforce_software(backend, config, capacity):
     """Pause charging at the limit and resume below the start level."""
     if capacity is None:
+        return
+    if capacity <= SAFETY_FLOOR:
+        backend.set_behaviour("auto")
         return
     if config["behaviour"] == "force-discharge":
         backend.set_behaviour("force-discharge")

@@ -110,12 +110,36 @@ class SoftwareTests(unittest.TestCase):
             try:
                 backend = core.SoftwareBackend([bat])
                 config = dict(core.DEFAULT_CONFIG, end=80, start=70)
-                for capacity, expected in ((60, "auto"), (80, "inhibit-charge"), (75, "inhibit-charge"),
+                for capacity, expected in ((15, "auto"), (60, "auto"), (80, "inhibit-charge"), (75, "inhibit-charge"),
                                            (70, "auto"), (75, "auto")):
                     core.enforce_software(backend, config, capacity)
                     self.assertEqual(core.parse_choices(core.read(path))[1], expected, capacity)
             finally:
                 core.write = original
+
+
+class SafetyTests(unittest.TestCase):
+    def test_behaviour_override(self):
+        info = {"capacity": 50, "ac": True}
+        config = dict(core.DEFAULT_CONFIG, behaviour="force-discharge")
+        self.assertFalse(core.behaviour_override(config, info))
+        self.assertTrue(core.behaviour_override(config, dict(info, capacity=core.SAFETY_FLOOR)))
+        self.assertEqual(config["behaviour"], "auto")
+        config = dict(core.DEFAULT_CONFIG, behaviour="inhibit-charge")
+        self.assertTrue(core.behaviour_override(config, dict(info, ac=False)))
+        self.assertEqual(config["behaviour"], "auto")
+        self.assertFalse(core.behaviour_override(dict(core.DEFAULT_CONFIG), info))
+
+    def test_software_limit_respects_switch(self):
+        backend = core.SoftwareBackend([])
+        original = core.load_config
+        try:
+            core.load_config = lambda: dict(core.DEFAULT_CONFIG, end=80, start=70)
+            self.assertEqual((backend.limit(), backend.start()), (80, 70))
+            core.load_config = lambda: dict(core.DEFAULT_CONFIG, end=80, limit_enabled=False)
+            self.assertEqual((backend.limit(), backend.start()), (100, None))
+        finally:
+            core.load_config = original
 
 
 class ParseTests(unittest.TestCase):

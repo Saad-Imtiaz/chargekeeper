@@ -10,6 +10,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 /usr/lib/chargekeeper/chargekeeper-helper set --limit-enabled off 2>/dev/null
+/usr/lib/chargekeeper/chargekeeper-helper release 2>/dev/null
 systemctl disable --now chargekeeper.service 2>/dev/null
 rm -rf /usr/lib/chargekeeper /etc/chargekeeper /var/lib/chargekeeper /run/chargekeeper
 rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
