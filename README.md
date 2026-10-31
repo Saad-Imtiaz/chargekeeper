@@ -331,8 +331,14 @@ you want.
 
 ```sh
 python3 -m unittest discover tests     # 46 tests, no root needed
-./bin/chargekeeper                     # runs from the source tree if not installed
+tools/run_app.py                       # run the app from the source tree
+tools/run_app.py --tray                # ...in background mode with the tray icon
+tools/soak.sh 600                      # CPU, wakeups and memory over 10 minutes
 ```
+
+Before changing the app, read [MAINTAINING.md](MAINTAINING.md): how it fits together, the rules
+learned from past bugs, and the checks before every commit. Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 | Module | Purpose |
 |---|---|
