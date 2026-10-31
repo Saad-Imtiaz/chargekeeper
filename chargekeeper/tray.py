@@ -307,11 +307,17 @@ class Tray:
         return GLib.SOURCE_REMOVE
 
     def _start_live(self):
+        live = getattr(self.app, "live", None)
+        if live:
+            live.want("tray-menu", LIVE_SECONDS)
         if not self.live_source:
             self.live_ticks = 0
             self.live_source = GLib.timeout_add_seconds(LIVE_SECONDS, self._live_tick)
 
     def _stop_live(self):
+        live = getattr(self.app, "live", None)
+        if live:
+            live.release("tray-menu")
         if self.live_source:
             GLib.source_remove(self.live_source)
             self.live_source = 0
@@ -331,12 +337,14 @@ class Tray:
         key, value = self.app_icons[name]
         return {key: value}
 
-    def update(self, opening=False):
+    def update(self, opening=False, info=None):
         """Re-read the battery and rebuild icon, label and menu; emit only what changed.
 
         opening: called from AboutToShow, where the host expects a new layout.
         """
-        info = core.combined_info()
+        if info is None:
+            live = getattr(self.app, "live", None)
+            info = live.info if live else core.combined_info()
         backend = core.detect()
         config = core.load_config()
 

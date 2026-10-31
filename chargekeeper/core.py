@@ -144,46 +144,99 @@ def ac_online():
     return state
 
 
-def battery_temperature(bat):
-    tenths = read_int(bat + "/temp")
+def supply_props(path):
+    """All properties of a power supply from one read of its uevent file.
+
+    One read returns every value the driver reports (0.01 ms), where reading the
+    attribute files one by one costs a syscall each. Keys are lowercased without the
+    POWER_SUPPLY_ prefix, e.g. "energy_now". If the driver fails the combined read
+    (one property erroring makes the whole file fail), fall back to single files.
+    """
+    text = read(path + "/uevent")
+    if text:
+        props = {}
+        for line in text.splitlines():
+            key, _, value = line.partition("=")
+            if key.startswith("POWER_SUPPLY_"):
+                props[key[13:].lower()] = value
+        if props:
+            return props
+    names = ("status", "capacity", "energy_now", "energy_full", "energy_full_design", "charge_now",
+             "charge_full", "charge_full_design", "power_now", "current_now", "voltage_now",
+             "voltage_min_design", "cycle_count", "technology", "manufacturer", "model_name", "temp")
+    return {n: v for n in names if (v := read(f"{path}/{n}")) is not None}
+
+
+# Slow sensors are read at most this often. On Acer the battery temperature is a
+# firmware (WMI) call that took 4 ms, more than everything else in a reading together.
+TEMPERATURE_SECONDS = 30
+_temperature_cache = {}
+
+
+def battery_temperature(bat, props=None):
+    # The uevent already carries "temp" when the driver has one; read the file otherwise.
+    tenths = _int(props.get("temp") if props is not None else read(bat + "/temp"))
     # Some firmware reports 0 or a Kelvin-based value when there is no sensor.
     if tenths is not None and -200 < tenths < 1000 and tenths != 0:
         return tenths / 10
+    cached = _temperature_cache.get(bat)
+    if cached and time.monotonic() - cached[0] < TEMPERATURE_SECONDS:
+        return cached[1]
+    value = None
     for path in glob.glob(bat + "/hwmon*/temp1_input"):
         milli = read_int(path)
         if milli is not None:
-            return milli / 1000
-    milli = read_int(ACER_DRIVER + "/temperature")
-    if milli is not None and -20000 < milli < 100000:
-        return milli / 1000
-    return None
+            value = milli / 1000
+            break
+    if value is None:
+        milli = read_int(ACER_DRIVER + "/temperature")
+        if milli is not None and -20000 < milli < 100000:
+            value = milli / 1000
+    _temperature_cache[bat] = (time.monotonic(), value)
+    return value
+
+
+def _int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _plausible(value, low, high):
+    return value if value is not None and low <= value <= high else None
 
 
 def battery_info(bat):
+    props = supply_props(bat)
+
     def num(name):
-        value = read_int(f"{bat}/{name}")
+        value = _int(props.get(name))
         return None if value is None else value / 1e6
 
-    voltage = num("voltage_now")
-    v_design = num("voltage_min_design") or voltage
+    # Values outside these ranges are firmware glitches (seen as 0 V, or
+    # 65535-style sentinels), so they're treated as missing.
+    voltage = _plausible(num("voltage_now"), 1, 60)
+    v_design = _plausible(num("voltage_min_design"), 1, 60) or voltage
     current = num("current_now")
     power = num("power_now")
     if power is None and voltage is not None and current is not None:
         power = voltage * current
     if power is not None:
-        power = abs(power)
+        power = _plausible(abs(power), 0, 300)
 
-    if os.path.exists(bat + "/energy_full"):
+    if "energy_full" in props or "energy_now" in props:
         now, full, design = num("energy_now"), num("energy_full"), num("energy_full_design")
     else:
         def wh(value):
             return None if value is None or v_design is None else value * v_design
         now, full, design = wh(num("charge_now")), wh(num("charge_full")), wh(num("charge_full_design"))
+    now, full, design = (_plausible(v, 0.1, 1000) for v in (now, full, design))
 
-    status = read(bat + "/status", "Unknown")
-    capacity = read_int(bat + "/capacity")
+    status = props.get("status", "Unknown")
+    capacity = _plausible(_int(props.get("capacity")), 0, 100)
     if capacity is None and now and full:
-        capacity = round(100 * now / full)
+        capacity = min(100, round(100 * now / full))
 
     return {
         "name": os.path.basename(bat),
@@ -196,11 +249,11 @@ def battery_info(bat):
         "energy_full": full,
         "energy_design": design,
         "health": 100 * full / design if full and design else None,
-        "cycle_count": read_int(bat + "/cycle_count"),
-        "technology": read(bat + "/technology"),
-        "manufacturer": (read(bat + "/manufacturer") or "").strip() or None,
-        "model": read(bat + "/model_name"),
-        "temperature": battery_temperature(bat),
+        "cycle_count": _int(props.get("cycle_count")),
+        "technology": props.get("technology"),
+        "manufacturer": (props.get("manufacturer") or "").strip() or None,
+        "model": props.get("model_name"),
+        "temperature": battery_temperature(bat, props),
     }
 
 
@@ -235,8 +288,12 @@ def combined_info():
 
 
 def time_remaining(info, limit=100):
-    """Hours until empty (discharging) or until the target (charging)."""
-    power = info.get("power")
+    """Hours until empty (discharging) or until the target (charging).
+
+    Uses the smoothed power from power.BatteryMonitor when present: instantaneous
+    readings jump with every load change, which made the estimate jump too.
+    """
+    power = info.get("power_avg") or info.get("power")
     now = info.get("energy_now")
     full = info.get("energy_full")
     if not power or power < 0.3 or now is None:

@@ -3,15 +3,19 @@
 import argparse
 import json
 import os
+import select
 import sys
 import time
 
-from . import core
+from . import core, power
 
-# Firmware thresholds hold on their own, so the daemon only checks for drift.
-# The software limit is enforced by the daemon itself and needs a faster loop.
-POLL_SECONDS = 30
-SOFTWARE_POLL_SECONDS = 10
+# The daemon sleeps until a kernel power_supply event (charger plugged or unplugged,
+# charging state or level changed, resume) or until the next deadline below.
+IDLE_SECONDS = 60           # firmware thresholds hold on their own; this only catches drift
+ACTIVE_SECONDS = 30         # calibration or a charge to full is running
+SOFTWARE_SECONDS = 20       # software limit while charging...
+SOFTWARE_NEAR_SECONDS = 5   # ...and within SOFTWARE_NEAR_PERCENT of the limit
+SOFTWARE_NEAR_PERCENT = 3
 LOG_SECONDS = 60
 
 
@@ -86,6 +90,39 @@ def cmd_release(args):
     core.release(core.detect())
 
 
+def next_interval(backend, config, info):
+    """Seconds until the next check when no kernel event arrives first."""
+    if backend and backend.software and info and info["status"] == "Charging":
+        wanted = core.target(config, backend)
+        if wanted and wanted[0] < 100 and info["capacity"] is not None:
+            # The daemon is the only thing stopping the charge here: look closely near the limit.
+            if info["capacity"] >= wanted[0] - SOFTWARE_NEAR_PERCENT:
+                return SOFTWARE_NEAR_SECONDS
+            return SOFTWARE_SECONDS
+    if config and (config["calibrating"] or config["top_up"]):
+        return ACTIVE_SECONDS
+    return IDLE_SECONDS
+
+
+def wait_for_event(events, timeout):
+    """Sleep up to timeout seconds; return early (True) on a power_supply event."""
+    deadline = time.monotonic() + timeout
+    fd = events.fileno()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if fd is None:
+            time.sleep(remaining)
+            return False
+        ready, _, _ = select.select([fd], [], [], remaining)
+        # Other subsystems' events wake us too; keep waiting unless one was ours.
+        if ready and events.drain():
+            time.sleep(power.DEBOUNCE_MS / 1000)     # let a burst of events settle
+            events.drain()
+            return True
+
+
 def write_state(state):
     os.makedirs(os.path.dirname(core.STATE_PATH), exist_ok=True)
     tmp = core.STATE_PATH + ".tmp"
@@ -100,9 +137,12 @@ def cmd_daemon(args):
     last_log = 0
     full_since = None
     sampler = core.CpuSampler()
+    events = power.UeventMonitor()
+    if events.fileno() is None:
+        print("Kernel events unavailable; polling instead", file=sys.stderr, flush=True)
     while True:
         error = None
-        backend = None
+        backend = config = info = None
         try:
             config = core.load_config()
             backend = core.detect()
@@ -162,7 +202,12 @@ def cmd_daemon(args):
             })
         except OSError as exc:
             print(f"Cannot write state: {exc}", file=sys.stderr, flush=True)
-        time.sleep(SOFTWARE_POLL_SECONDS if backend and backend.software else POLL_SECONDS)
+        try:
+            interval = next_interval(backend, config, info)
+        except Exception:   # never let scheduling stop enforcement
+            interval = SOFTWARE_NEAR_SECONDS
+        until_log = last_log + LOG_SECONDS - time.time()
+        wait_for_event(events, max(1.0, min(interval, until_log)))
 
 
 def main(argv=None):

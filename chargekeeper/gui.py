@@ -14,7 +14,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, VERSION, core, tray  # noqa: E402
+from . import APP_ID, VERSION, core, power, tray  # noqa: E402
 from .cli import fmt_hours, helper_command  # noqa: E402
 
 GREEN = (0.15, 0.73, 0.42)
@@ -41,6 +41,10 @@ BEHAVIOUR_NAMES = {
     "force-discharge": "Run on battery while plugged in",
 }
 PRESETS = (60, 70, 80, 85, 90)
+# Battery numbers come from App.live (events plus polling while shown); the rest of
+# the window (config, service state, power settings) changes rarely.
+WINDOW_LIVE_SECONDS = 2
+SLOW_REFRESH_SECONDS = 10
 RANGES = (("6 hours", 6 * 3600), ("24 hours", 24 * 3600), ("7 days", 7 * 86400))
 USAGE_RANGES = (("Today", 1), ("Last 7 days", 7))
 USAGE_APPS = 8
@@ -407,9 +411,12 @@ class Window(Adw.ApplicationWindow):
         self.toasts.set_child(view)
         self.set_content(self.toasts)
 
+        self.config = core.load_config()
+        self.effective = 100
         self.refresh()
         self.refresh_charts()
-        self.timer = GLib.timeout_add_seconds(3, self._tick)
+        self.timer = GLib.timeout_add_seconds(SLOW_REFRESH_SECONDS, self._tick)
+        self.app.live.subscribe(self._on_battery)
         self.connect("close-request", self._on_close)
         self.connect("notify::visible", self._on_visible)
         self.stack.connect("notify::visible-child-name", self._on_page)
@@ -420,9 +427,17 @@ class Window(Adw.ApplicationWindow):
 
     def _on_visible(self, *_):
         if self.get_visible():
+            self.app.live.want("window", WINDOW_LIVE_SECONDS)
             self.refresh()
             self.refresh_charts()
+        else:
+            self.app.live.release("window")
         self._on_page()
+
+    def _on_battery(self, info):
+        """A new live reading: redraw only the battery numbers."""
+        if self.get_mapped() and not self.is_suspended():
+            self._refresh_overview(info, self.backend, self.config, self.effective)
 
     def _on_close(self, *_):
         if self.app.prefs["background"]:
@@ -433,6 +448,8 @@ class Window(Adw.ApplicationWindow):
             return True
         GLib.source_remove(self.timer)
         self.monitor_page.set_active(False)
+        self.app.live.release("window")
+        self.app.live.listeners.remove(self._on_battery)
         self.app.window = None
         return False
 
@@ -793,13 +810,13 @@ class Window(Adw.ApplicationWindow):
     # --- refresh ---
 
     def refresh(self):
-        info = core.combined_info()
+        info = self.app.live.info
         self.backend = backend = core.detect()
         desc = backend.describe()
-        config = core.load_config()
+        self.config = config = core.load_config()
         state = core.daemon_state()
         limit = backend.limit() if backend.available else None
-        effective = limit if limit is not None else 100
+        self.effective = effective = limit if limit is not None else 100
 
         if backend.available and not (state and state["alive"]):
             self.banner.set_title("Background service is not running, so limits won't be re-applied "
@@ -1269,12 +1286,18 @@ class App(Adw.Application):
                 "net.hadess.PowerProfiles", "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", None)
         except GLib.Error:
             self.ppd_proxy = None
+        # One shared live reading for the window, the tray and notifications: kernel
+        # events plus polling only while something on screen asks for it.
+        self.live = power.LiveBattery()
+        self.live.subscribe(self._on_battery)
         sync_autostart(self.prefs["background"])
         self.set_background(self.prefs["background"])
-        GLib.timeout_add_seconds(30, self._watch)
-        # One immediate check. An idle callback that returns SOURCE_CONTINUE runs again
-        # straight away, which spun a CPU core re-reading the battery nonstop.
-        GLib.idle_add(lambda: self._watch() and GLib.SOURCE_REMOVE)
+        GLib.idle_add(lambda: self._on_battery(self.live.info) and GLib.SOURCE_REMOVE)
+
+    def _on_battery(self, info):
+        if self.tray:
+            self.tray.update(info=info)
+        self._watch(info)
 
     def do_activate(self):
         if self.start_hidden:
@@ -1412,12 +1435,10 @@ class App(Adw.Application):
         if self.window:
             self.window.stack.set_visible_child_name(name)
 
-    def _watch(self):
-        if self.tray:
-            self.tray.update()      # battery icon and label; the monitor samples on demand
-        info = core.combined_info()
+    def _watch(self, info):
+        """Notifications, evaluated on every changed battery reading."""
         if not info or info["capacity"] is None:
-            return GLib.SOURCE_CONTINUE
+            return
         prefs = self.prefs
         backend = core.detect()
         config = core.load_config()
@@ -1450,7 +1471,6 @@ class App(Adw.Application):
             self._notify("hot", f"Battery is hot: {temp:.0f} °C",
                          "Heat wears the battery quickly. Give the vents some room or lower the load.",
                          Gio.NotificationPriority.HIGH)
-        return GLib.SOURCE_CONTINUE
 
 
 def main(argv):
