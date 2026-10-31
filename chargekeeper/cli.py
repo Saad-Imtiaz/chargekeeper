@@ -7,7 +7,7 @@ import sys
 from . import core
 
 HELPER = "/usr/lib/chargekeeper/chargekeeper-helper"
-COMMANDS = ("status", "limit", "topup", "calibrate", "help")
+COMMANDS = ("status", "limit", "full", "topup", "calibrate", "help")
 
 
 def helper_command(*args):
@@ -78,13 +78,13 @@ def main(argv):
         else:
             args = ["--limit-enabled", "on", "--top-up", "off", "--end", rest[0]]
         return subprocess.call(helper_command("set", *args))
-    if command == "topup":
+    if command in ("full", "topup"):
         return subprocess.call(helper_command("set", "--top-up", rest[0] if rest else "on"))
     if command == "calibrate" and len(rest) == 1:
         return subprocess.call(helper_command("set", "--calibration", rest[0]))
     print("usage: chargekeeper [status]\n"
           "       chargekeeper limit <20-100|off>\n"
-          "       chargekeeper topup [on|off]      charge to 100% until unplugged\n"
+          "       chargekeeper full [on|off]       charge to 100% once, until unplugged\n"
           "       chargekeeper calibrate <on|off>\n"
           "       chargekeeper                     (no arguments in a desktop: open the app)",
           file=sys.stderr)

@@ -32,7 +32,9 @@ the limit off first.
   A requested limit the firmware can't do is rounded **down** to the nearest supported value, so
   the battery is never charged past what you asked for. Dell's rules (stop 55–100%, start 50–95%,
   stop at least 5% above start) are applied automatically.
-- **Charge to 100% once**: lifts the limit until you unplug, then restores it.
+- **Charge to full**: one button on the Overview (and in the tray) lifts the limit until you
+  unplug, then restores it. If you never unplug, the limit comes back 6 hours after the battery is
+  full, so it doesn't sit at 100% for days.
 - **Pause charging / run on battery while plugged in**, where the kernel exposes `charge_behaviour`.
 - **Charging mode** (Standard, Adaptive, Long Life, …) on Dell and others with `charge_types`.
 - **Calibration** on Acer. It switches itself off when the firmware finishes, when the charger is
@@ -52,7 +54,7 @@ the limit off first.
 ```
 chargekeeper status
 chargekeeper limit 85        # or: off
-chargekeeper topup           # charge to 100% until unplugged
+chargekeeper full            # charge to 100% once (alias: topup)
 chargekeeper calibrate on    # Acer
 ```
 

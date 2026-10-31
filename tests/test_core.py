@@ -169,6 +169,14 @@ class SafetyTests(unittest.TestCase):
             core.load_config = original
 
 
+class FullTests(unittest.TestCase):
+    def test_is_full(self):
+        self.assertTrue(core.is_full({"status": "Full", "capacity": 97}))
+        self.assertTrue(core.is_full({"status": "Charging", "capacity": 99}))
+        self.assertFalse(core.is_full({"status": "Charging", "capacity": 90}))
+        self.assertFalse(core.is_full(None))
+
+
 class ParseTests(unittest.TestCase):
     def test_choices(self):
         self.assertEqual(core.parse_choices("auto [inhibit-charge] force-discharge"),

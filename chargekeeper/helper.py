@@ -98,6 +98,7 @@ def write_state(state):
 def cmd_daemon(args):
     last_ac = None
     last_log = 0
+    full_since = None
     while True:
         error = None
         backend = None
@@ -111,6 +112,12 @@ def cmd_daemon(args):
             if config["top_up"] and last_ac and ac is False:
                 config["top_up"] = False
                 core.save_config(config)
+
+            full_since = (full_since or time.time()) if config["top_up"] and core.is_full(info) else None
+            if full_since and time.time() - full_since > core.TOP_UP_FULL_HOURS * 3600:
+                config["top_up"] = False
+                core.save_config(config)
+                full_since = None
 
             if core.behaviour_override(config, info):
                 core.save_config(config)

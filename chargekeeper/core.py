@@ -47,6 +47,13 @@ SAFETY_FLOOR = 20
 # it finished, so a forgotten calibration can't keep cycling the battery.
 CALIBRATION_MAX_HOURS = 24
 
+# "Charge to full" ends on unplug, or once the battery has sat full this long.
+TOP_UP_FULL_HOURS = 6
+
+
+def is_full(info):
+    return bool(info) and (info["status"] == "Full" or (info["capacity"] or 0) >= 99)
+
 
 # --- sysfs helpers ---------------------------------------------------------
 

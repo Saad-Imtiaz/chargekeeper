@@ -424,7 +424,9 @@ class Window(Adw.ApplicationWindow):
         self.ring = Ring(230)
         self.status_title = Gtk.Label(css_classes=["title-2"], wrap=True, justify=Gtk.Justification.CENTER)
         self.status_sub = Gtk.Label(css_classes=["dim-label"], wrap=True, justify=Gtk.Justification.CENTER)
-        for widget in (self.ring, self.status_title, self.status_sub):
+        self.full_button = Gtk.Button(halign=Gtk.Align.CENTER, margin_top=8, css_classes=["pill"])
+        self.full_button.connect("clicked", self._on_full_button)
+        for widget in (self.ring, self.status_title, self.status_sub, self.full_button):
             box.append(widget)
         hero.add(box)
         page.add(hero)
@@ -520,8 +522,9 @@ class Window(Adw.ApplicationWindow):
 
         self.topup_group = Adw.PreferencesGroup()
         self.topup_row = Adw.SwitchRow(
-            title="Charge to 100% once",
-            subtitle="For a long day away from a charger. The limit comes back when you unplug.")
+            title="Charge to full once",
+            subtitle="For a long day away from a charger. The limit comes back when you unplug, "
+                     f"or {core.TOP_UP_FULL_HOURS} hours after the battery is full.")
         self.topup_row.add_prefix(Gtk.Image(icon_name="airplane-mode-symbolic"))
         self.topup_row.connect("notify::active", self._on_topup)
         self.topup_group.add(self.topup_row)
@@ -722,6 +725,19 @@ class Window(Adw.ApplicationWindow):
         self.status_title.set_label(title)
         self.status_sub.set_label(sub)
         self.status_sub.set_visible(bool(sub))
+
+        # Only worth offering while a limit is actually holding the charge back.
+        limited = backend.available and config["limit_enabled"] and not config["calibrating"]
+        self.full_button.set_visible(limited and (config["top_up"] or limit < 100))
+        if config["top_up"]:
+            self.full_button.set_label("Stop and restore the limit")
+            self.full_button.remove_css_class("suggested-action")
+        else:
+            self.full_button.set_label("Charge to full")
+            self.full_button.add_css_class("suggested-action")
+        self.full_button.set_tooltip_text(
+            f"Charge to 100% once. The {limit}% limit comes back when you unplug."
+            if not config["top_up"] else "Go back to the charge limit now")
 
         if not backend.available:
             self.limit_row.set_subtitle("Not supported by this laptop's firmware")
@@ -994,6 +1010,9 @@ class Window(Adw.ApplicationWindow):
     def _on_start(self, row, _pspec):
         if not self.syncing:
             self._queue(start=int(row.get_value()))
+
+    def _on_full_button(self, _button):
+        self._queue(**{"top-up": not core.load_config()["top_up"]})
 
     def _on_topup(self, row, _pspec):
         if not self.syncing:
