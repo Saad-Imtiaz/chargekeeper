@@ -36,8 +36,18 @@ the limit off first.
   | none | everything else | unplug reminder notification at your chosen level |
 
   A requested limit the firmware can't do is rounded **down** to the nearest supported value, so
-  the battery is never charged past what you asked for. Dell's rules (stop 55–100%, start 50–95%,
-  stop at least 5% above start) are applied automatically.
+  the battery is never charged past what you asked for. Firmware quirks are handled
+  automatically:
+
+  | Maker | Driver | Handling |
+  |---|---|---|
+  | Dell | `dell-laptop` | stop 55–100%, start 50–95%, stop at least 5% above start |
+  | LG gram, Toshiba/Dynabook | `lg-laptop`, `toshiba_acpi` | only 80% or 100% are accepted, so the limit is fixed at 80% |
+  | MSI | `msi-ec` | resume level is always 10% below the limit; start is never written (writing it moves the limit) |
+  | Lenovo IdeaPad/Legion | `ideapad_acpi` | conservation mode, 60–80% depending on the model |
+
+  If firmware rejects a value anyway, the error says so and suggests 80%. Some ASUS models only
+  honour 60, 80 or 100% even though the kernel accepts any value.
 - **Charge to full**: one button on the Overview (and in the tray) lifts the limit until you
   unplug, then restores it. If you never unplug, the limit comes back 6 hours after the battery is
   full, so it doesn't sit at 100% for days.
@@ -53,13 +63,18 @@ the limit off first.
 - **Tray icon**: battery level in the top bar. Click it for a menu with the current state, the
   charge limit (60–90% or no limit), **Charge to full once**, a **System monitor** section
   (processor, memory, disk, network and temperatures, each opening a submenu with the top three
-  apps), and Open / Quit. Turn it on under
-  System → Tray icon; it starts at login. It uses the StatusNotifierItem protocol: KDE, Cinnamon,
+  apps), and Open / Quit. The monitor section measures when the menu opens (a fresh reading within
+  a second) and refreshes every 2 s while it stays open; nothing runs while it's closed. Turn it
+  on under Settings → Tray icon; it starts at login. It uses the StatusNotifierItem protocol: KDE, Cinnamon,
   XFCE and others show it natively, GNOME needs the AppIndicator extension (Ubuntu ships it; the
   app offers to enable it).
 - **Monitor**: live processor, memory, disk and network use with a 2-minute sparkline and the
   top 3 apps in each, plus CPU, battery, motherboard, SSD and GPU temperatures and a list of every
-  sensor. It samples every 2 s only while the page is open (about 1% of one core). Per-app disk
+  sensor. It samples every 2 s only while the page is open (about 1% of one core). Memory per app
+  is private memory (resident minus shared), as GNOME System Monitor shows it. Temperatures are
+  classified per reading, so mixed embedded-controller chips (Dell `dell_smm`, Framework `cros_ec`,
+  ThinkPad, HP) and ARM laptops (`cpu*_thermal`) get the right CPU, battery and board values; on
+  Ryzen, `Tdie` is preferred over the offset `Tctl`. Per-app disk
   use covers your own processes; per-app network use covers TCP connections (QUIC/UDP isn't
   attributed). SSD temperatures are read at most every 30 s, since each read wakes the drive.
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
