@@ -3,6 +3,12 @@
 Battery charge limits, health tracking and power tools for Linux laptops. GTK 4 / libadwaita app,
 a small root service, and a CLI.
 
+| Tray icon | Tray menu | Top apps |
+|---|---|---|
+| ![Tray icon](docs/screenshots/tray-icon.png) | ![Tray menu](docs/screenshots/tray-menu.png) | ![Processor submenu](docs/screenshots/tray-menu-processor.png) |
+
+![Monitor page](docs/screenshots/monitor-page.png)
+
 ## Install
 
 ```sh

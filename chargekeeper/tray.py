@@ -106,7 +106,8 @@ ID_STATUS, ID_HEADER, ID_NO_LIMIT, ID_FULL, ID_OPEN, ID_QUIT = 1, 2, 3, 4, 5, 6
 ID_SEPARATORS = (90, 91, 92, 93)
 LIMIT_BASE = 100
 # System monitor section: each row's submenu holds its top apps at row id + 1..3.
-ID_MON_HEADER, ID_CPU, ID_MEM, ID_DISK, ID_NET, ID_TEMPS, ID_OPEN_MONITOR = 300, 310, 320, 330, 340, 350, 360
+ID_MON_HEADER, ID_MEASURING = 300, 301
+ID_CPU, ID_MEM, ID_DISK, ID_NET, ID_TEMPS, ID_OPEN_MONITOR = 310, 320, 330, 340, 350, 360
 TEMP_ICONS = {"cpu": "ck-cpu-symbolic", "battery": "battery-good-symbolic", "board": "ck-board-symbolic",
               "storage": "drive-harddisk-solidstate-symbolic", "gpu": "video-display-symbolic"}
 
@@ -184,6 +185,8 @@ class Tray:
         self.net_apps = []
         self.temps = []
         self.app_icons = {}
+        self.menu_open = False
+        self.layout_pending = False
         self.sample()
 
         item_info = Gio.DBusNodeInfo.new_for_xml(ITEM_XML).interfaces[0]
@@ -216,10 +219,23 @@ class Tray:
         try:
             bus.call_finish(result)
             self.host_available = True
+            # GNOME's AppIndicator extension only picks the label up from the change
+            # signal, never from the initial property read, so announce it again once
+            # the host has had a moment to set up its proxy.
+            for delay in (1, 4):
+                GLib.timeout_add_seconds(delay, self._announce_label)
         except GLib.Error as exc:
             print(f"Tray: cannot register with {WATCHER}: {exc.message}", flush=True)
             self.host_available = False
         self.app.tray_changed()
+
+    def _announce_label(self):
+        # The extension caches the label from its first property read but only shows
+        # it on a change, and it drops updates equal to the cached value. Blank it and
+        # set it again so the label appears even though the text hasn't changed.
+        self._emit_item("XAyatanaNewLabel", GLib.Variant("(ss)", ("", "")))
+        self._emit_item("XAyatanaNewLabel", GLib.Variant("(ss)", (self.label, "100%")))
+        return GLib.SOURCE_REMOVE
 
     def _watcher_vanished(self, _bus, _name):
         self.host_available = False
@@ -249,8 +265,11 @@ class Tray:
         key, value = self.app_icons[name]
         return {key: value}
 
-    def update(self):
-        """Re-read the battery and rebuild icon, label and menu; emit only what changed."""
+    def update(self, opening=False):
+        """Re-read the battery and rebuild icon, label and menu; emit only what changed.
+
+        opening: called from AboutToShow, where the host expects a new layout.
+        """
         info = core.combined_info()
         backend = core.detect()
         config = core.load_config()
@@ -269,11 +288,22 @@ class Tray:
             self._emit_item("NewToolTip")
 
         items, children, handlers = self._build_menu(info, backend, config, tooltip)
-        if items != self.items or children != self.children:
+        if children != self.children and self.menu_open and not opening:
+            # A new layout rebuilds the open menu, collapsing submenus and moving rows
+            # under the pointer; wait until it closes.
+            self.layout_pending = True
+            return
+        if children != self.children or (items != self.items and (opening or not self.menu_open)):
             self.items, self.children = items, children
             self.revision += 1
             self._emit(MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated",
                        GLib.Variant("(ui)", (self.revision, 0)))
+        elif items != self.items:
+            # Same structure while open: update the changed rows in place.
+            changed = [i for i in items if items[i] != self.items.get(i)]
+            self.items = items
+            self._emit(MENU_PATH, "com.canonical.dbusmenu", "ItemsPropertiesUpdated",
+                       GLib.Variant("(a(ia{sv})a(ias))", ([(i, self._props(i)) for i in changed], [])))
         self.handlers = handlers
 
     def _build_menu(self, info, backend, config, status):
@@ -334,7 +364,7 @@ class Tray:
         add(ID_MON_HEADER, label="System monitor", enabled=False)
         r = self.stats
         if r is None:
-            add(ID_CPU, label="Measuring…", enabled=False)
+            add(ID_MEASURING, label="Measuring…", enabled=False)
         else:
             mem_pct = 100 * r["mem_used"] / (r["mem_total"] or 1)
             rows = (
@@ -348,16 +378,19 @@ class Tray:
                  f"Network · ↓ {fmt(r['net_down'], rate=True)}  ↑ {fmt(r['net_up'], rate=True)}",
                  [(n, fmt(v, rate=True)) for n, v in self.net_apps]),
             )
+            open_monitor = lambda: self.app.show_page("monitor")  # noqa: E731
             for row_id, icon, label, apps in rows:
+                if not apps:
+                    # GNOME greys out a submenu holding only disabled rows, so an idle
+                    # category is a plain row that opens the Monitor tab instead.
+                    add(row_id, open_monitor, label=menu_text(label), **{"icon-name": icon})
+                    continue
                 add(row_id, label=menu_text(label), **{"icon-name": icon})
                 kids = []
                 for i, (name, value) in enumerate(apps[:3], start=1):
                     display = monitor.app_identity(name)[0]
-                    add(row_id + i, label=menu_text(f"{display} · {value}"), **self._icon_for(name))
+                    add(row_id + i, open_monitor, label=menu_text(f"{display} · {value}"), **self._icon_for(name))
                     kids.append(row_id + i)
-                if not kids:
-                    add(row_id + 1, label="No app activity right now", enabled=False)
-                    kids.append(row_id + 1)
                 children[row_id] = kids
         if self.temps:
             readings = [(kind, title, value) for kind, title, value, _src in self.temps if value is not None]
@@ -433,8 +466,13 @@ class Tray:
     def _props(self, item_id):
         if item_id == 0:
             return {"children-display": GLib.Variant("s", "submenu")}
-        out = {}
-        for key, value in self.items.get(item_id, {}).items():
+        # Always state enabled/visible: GNOME's extension keeps a stale "enabled: false"
+        # when a later layout simply leaves the key out (which means the default).
+        props = self.items.get(item_id, {})
+        out = {"enabled": GLib.Variant("b", True), "visible": GLib.Variant("b", True)}
+        if props.get("type") == "separator":
+            out.pop("enabled")
+        for key, value in props.items():
             kind = ("b" if isinstance(value, bool) else "i" if isinstance(value, int)
                     else "ay" if isinstance(value, bytes) else "s")
             out[key] = GLib.Variant(kind, value)
@@ -446,6 +484,12 @@ class Tray:
                 [GLib.Variant("(ia{sv}av)", self._layout(k, depth - 1)) for k in kids])
 
     def _click(self, item_id, event):
+        if item_id == 0 and event in ("opened", "closed"):
+            self.menu_open = event == "opened"
+            if not self.menu_open and self.layout_pending:
+                self.layout_pending = False
+                GLib.idle_add(lambda: self.update() and False)
+            return
         handler = self.handlers.get(item_id)
         if event == "clicked" and handler:
             # Leave the D-Bus call first; the handler may start pkexec or open a window.
@@ -474,12 +518,12 @@ class Tray:
             before = self.revision
             if args[0] == 0:
                 self.sample(temperatures=True)
-            self.update()   # fresh numbers each time the menu opens
+            self.update(opening=True)   # fresh numbers each time the menu opens
             invocation.return_value(GLib.Variant("(b)", (self.revision != before,)))
         elif method == "AboutToShowGroup":
             if 0 in args[0]:
                 self.sample(temperatures=True)
-            self.update()
+            self.update(opening=True)
             invocation.return_value(GLib.Variant("(aiai)", ([], [])))
         else:
             invocation.return_error_literal(Gio.dbus_error_quark(), Gio.DBusError.UNKNOWN_METHOD, method)
