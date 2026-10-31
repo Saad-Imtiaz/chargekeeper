@@ -58,6 +58,7 @@ install -Dm 644 "$SRC/data/dev.chargekeeper.Chargekeeper.desktop" \
     /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop
 install -Dm 644 "$SRC/data/dev.chargekeeper.Chargekeeper.svg" \
     /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg
+install -Dm 644 -t /usr/share/icons/hicolor/symbolic/apps "$SRC"/data/icons/hicolor/symbolic/apps/*.svg
 gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database -q /usr/share/applications 2>/dev/null || true
 

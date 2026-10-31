@@ -361,7 +361,7 @@ def combo_value(row):
 
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Chargekeeper", default_width=680, default_height=860,
+        super().__init__(application=app, title="Chargekeeper", default_width=860, default_height=880,
                          width_request=360, height_request=420)
         self.app = app
         self.syncing = False
@@ -392,13 +392,14 @@ class Window(Adw.ApplicationWindow):
 
         bottom = Adw.ViewSwitcherBar(stack=self.stack)
         view.add_bottom_bar(bottom)
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 600sp"))
+        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 720sp"))
         breakpoint.add_setter(bottom, "reveal", True)
         breakpoint.add_setter(switcher, "visible", False)
         self.add_breakpoint(breakpoint)
 
         self._build_overview()
         self._build_usage()
+        self._build_monitor()
         self._build_charging()
         self._build_health()
         self._build_system()
@@ -410,9 +411,15 @@ class Window(Adw.ApplicationWindow):
         self.refresh_charts()
         self.timer = GLib.timeout_add_seconds(3, self._tick)
         self.connect("close-request", self._on_close)
+        self.stack.connect("notify::visible-child-name", self._on_page)
+
+    def _on_page(self, *_):
+        # The monitor samples /proc every 2 s, so it only runs while it's on screen.
+        self.monitor_page.set_active(self.stack.get_visible_child_name() == "monitor")
 
     def _on_close(self, *_):
         GLib.source_remove(self.timer)
+        self.monitor_page.set_active(False)
         self.app.window = None
         return False
 
@@ -455,7 +462,7 @@ class Window(Adw.ApplicationWindow):
         self.v_power = info_row(now, "Power", "power-profile-balanced-symbolic")
         self.v_time = info_row(now, "Time", "preferences-system-time-symbolic")
         self.v_energy = info_row(now, "Energy", "battery-level-70-symbolic")
-        self.v_temp = info_row(now, "Battery temperature", "weather-clear-symbolic")
+        self.v_temp = info_row(now, "Battery temperature", "ck-temperature-symbolic")
         page.add(now)
 
         history = Adw.PreferencesGroup(title="History")
@@ -478,7 +485,7 @@ class Window(Adw.ApplicationWindow):
 
     def _build_usage(self):
         page = Adw.PreferencesPage()
-        self.stack.add_titled_with_icon(page, "usage", "Usage", "utilities-system-monitor-symbolic")
+        self.stack.add_titled_with_icon(page, "usage", "Usage", "document-open-recent-symbolic")
 
         self.usage_battery = Adw.PreferencesGroup(title="On battery")
         picker = Gtk.DropDown.new_from_strings([label for label, _ in USAGE_RANGES])
@@ -557,6 +564,12 @@ class Window(Adw.ApplicationWindow):
             bar.set_value(share)
             label.set_label(f"{share * 100:.0f}%")
             row.set_visible(True)
+
+    def _build_monitor(self):
+        from .monitor_page import MonitorPage
+        self.monitor_page = MonitorPage()
+        self.stack.add_titled_with_icon(self.monitor_page, "monitor", "Monitor",
+                                        "utilities-system-monitor-symbolic")
 
     def _build_charging(self):
         page = Adw.PreferencesPage()
@@ -698,7 +711,7 @@ class Window(Adw.ApplicationWindow):
 
     def _build_system(self):
         page = Adw.PreferencesPage()
-        self.stack.add_titled_with_icon(page, "system", "System", "preferences-system-symbolic")
+        self.stack.add_titled_with_icon(page, "system", "Settings", "emblem-system-symbolic")
 
         power = Adw.PreferencesGroup(title="Performance")
         self.ppd_row = Adw.ComboRow(title="Power mode")
@@ -1224,6 +1237,9 @@ class App(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        from . import monitor_page
+        monitor_page.load_css()
+        monitor_page.add_icon_path()
         for name, callback, accels in (("about", self._about, []),
                                        ("quit", lambda *_: self.quit(), ["<primary>q"]),
                                        ("close", self._hide, ["<primary>w"])):

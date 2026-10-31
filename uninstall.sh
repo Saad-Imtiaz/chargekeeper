@@ -18,7 +18,8 @@ rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
     /usr/share/polkit-1/actions/dev.chargekeeper.Chargekeeper.policy \
     /usr/share/polkit-1/rules.d/50-dev.chargekeeper.Chargekeeper.rules \
     /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop \
-    /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg
+    /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg \
+    /usr/share/icons/hicolor/symbolic/apps/ck-{cpu,memory,temperature,board}-symbolic.svg
 systemctl daemon-reload
 
 if [ -n "${SUDO_USER:-}" ]; then

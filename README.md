@@ -49,6 +49,11 @@ the limit off first.
   System → Tray icon; it starts at login. It uses the StatusNotifierItem protocol: KDE, Cinnamon,
   XFCE and others show it natively, GNOME needs the AppIndicator extension (Ubuntu ships it; the
   app offers to enable it).
+- **Monitor**: live processor, memory, disk and network use with a 2-minute sparkline and the
+  top 3 apps in each, plus CPU, battery, motherboard, SSD and GPU temperatures and a list of every
+  sensor. It samples every 2 s only while the page is open (about 1% of one core). Per-app disk
+  use covers your own processes; per-app network use covers TCP connections (QUIC/UDP isn't
+  attributed). SSD temperatures are read at most every 30 s, since each read wakes the drive.
 - **Notifications**: unplug reminder, limit reached, top-up done, low battery, battery too hot.
 - **Power**: power-profiles-daemon mode, firmware platform profile, CPU energy preference.
 - **Re-applies settings** every 30 s (10 s for the software limit) and after resume, for firmware
