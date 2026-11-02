@@ -16,7 +16,44 @@ Add new entries at the top of **Unreleased**, one per commit or related group of
 
 When releasing, rename **Unreleased** to the version and date (see MAINTAINING.md, "Releasing").
 
-## Unreleased (since 1.0.0)
+## Unreleased (since 1.1.0)
+
+## 1.1.0 (2026-11-03)
+
+### 2026-11-03: First public release
+- **Added:** `tools/release.sh` builds and tests the archive from the tag; release notes in
+  `docs/releases/`; refreshed README screenshots, a new one of the update speed menu, and a note on
+  which laptop is the reference.
+- **Changed:** the README's install steps start from the release download. Its opening no longer says
+  the default limit is 80%: the installer sets 85%, rounded down to what the laptop supports.
+
+### 2026-11-03: The installer asks for the laptop's maker (3ecf525)
+- **Added:** `sudo ./install.sh --acer` (or `--dell`, `--lenovo` and so on) skips the question; with
+  no flag a menu opens with the firmware's maker, or the last choice, selected. `--help`, `--dry-run`.
+- **Changed:** choosing Acer in the menu builds the driver, and the menu says so. Without a terminal
+  the driver is built only with `--acer`, because it's third-party code. An update no longer rebuilds
+  a driver that's already installed for this kernel at the same commit.
+- **Fixed:** a failed driver build or a module refused by Secure Boot stopped the installer before the
+  service started. It now finishes, explains what to do, and exits non-zero.
+
+### 2026-11-03: Monitor update speed and smooth animation (19be613)
+- **Added:** a menu on the Monitor tab: every 0.5, 1, 2 or 5 s, and Smooth animation, saved per user.
+  The default goes from 2 s to 1 s with animation on. Desktop-wide "animations off" is respected.
+- **Changed:** only the system totals follow the fast speeds (0.2 ms a reading). The per-app scan
+  (4.5 ms) runs at most every 2 s, temperatures every 2 s, `ss` every 6 s. Graphs keep their two
+  minutes when the speed changes.
+- **Fixed:** the temperature tiles averaged using the time since the last sample, not the last
+  temperature reading, so they lagged behind.
+- **Measured** (`tools/monitor_stability.py`, GPU renderer, on battery): CPU at 1 s plain 3.73%, 1 s
+  smooth 5.17%, 0.5 s smooth 5.82% of one core; the old 2 s page took 3.3% (nested, cairo). Battery
+  power 18.5 W for all of them, within 0.1 W of noise, in two of three rounds; the first round had a
+  spike to 30 W while other commands ran, so it's discarded. Page jumps 0 at every speed. Memory at
+  0.5 s smooth over 6 min: 196.8 → 197.2 MB, slowing to about 35 KB a minute. Rendering with cairo:
+  21% at 30 frames a second, 9% at 10, so software rendering uses 10.
+  `tools/soak.sh 600`, on battery, old → new: tray 0.0167% → 0.02% (one clock tick apart), 4 wakeups a
+  minute on both; service 0.0233% on both, 1 wakeup a minute; memory flat.
+- **Lesson:** schedule by time once the tick rate can change, and judge animation on the real renderer.
+  Rules 45 and 46.
 
 ### 2026-11-02: Power from charger and battery, and a Monitor tab that holds still (19b6098)
 - **Added:** a Power section on the Overview and Monitor tabs: from charger, from or into battery,

@@ -84,7 +84,11 @@ Each line names where the code lives. Keep this list complete.
 - Processor, memory (private memory per app), disk and network with sparklines and top 3 apps.
 - Temperatures: CPU, battery, motherboard, SSD, GPU tiles plus every sensor; per-reading
   classification for mixed embedded-controller chips.
-- Sampling every 2 s only while the Monitor tab is visible, in a short-lived worker thread.
+- Update speed menu (0.5, 1, 2 or 5 s, saved per user) on the Monitor tab. Sampling runs only while
+  the tab is visible, in a short-lived worker thread. Only the cheap totals follow the fast speeds:
+  `monitor.process_period`, `temperature_period`, `network_period`. `MonitorPage._build_menu`
+- Smooth animation (a menu switch, off with the desktop's animations): numbers and bars glide
+  (`monitor.Glide`), charts slide a cached drawing. `MonitorPage._frame`, `Sparkline.do_snapshot`
 - A page that holds still: fixed layout, steady top-app lists (`monitor.TopTracker`), averaged
   headline numbers, round sparkline scales with a label (`monitor.nice_ceiling`), a gap in the line
   after time away.
@@ -102,6 +106,9 @@ Each line names where the code lives. Keep this list complete.
 - Polkit: administrators at the active local seat need no password; others authenticate.
 - CLI: status, limit, full (alias topup), calibrate.
 - Installer for apt, dnf, pacman and zypper; uninstaller switches the limit off first.
+- Installer maker choice: `--MAKER` flag, else a menu with the firmware's maker (or the last choice)
+  selected. Choosing Acer builds the driver; a failed driver build still starts the service.
+  `install.sh`, `tests/test_install.py`
 
 ## Rules learned the hard way
 
@@ -186,6 +193,14 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 44. **Don't touch a widget that didn't change.** Removing and re-adding the same CSS class restyles
     it, and `set_from_gicon` queues a resize even with the same icon. Compare first.
 
+45. **Schedule by time, not by counting ticks, once the tick rate can change.** `ticks % 3` would have
+    run `ss` four times as often at 0.5 s. An average must also get the time since *its own* last
+    value: temperatures were given the time since the last sample, so they lagged more at fast speeds.
+46. **Judge animation cost on the real renderer, in watts if you can.** `tools/nested-gnome.sh` forces
+    cairo. There 30 frames a second cost 21% of a core; with the GPU on the reference laptop it cost
+    about 1.4%, and battery power didn't measurably change. Keep per-frame work to moving a cached
+    drawing: rebuilding paths point by point is thousands of PyGObject calls a frame.
+
 ### Tray (GNOME AppIndicator extension)
 
 27. **The extension shows the label only after a change and drops values equal to its cache.** Clear
@@ -255,17 +270,25 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 | `tools/click.py X Y [hover]` | Click on `:9` only. The tray icon is at about (1478, 15). |
 | `tools/xwd2png.py IN.xwd OUT.png [X Y W H]` | Convert `xwd -root -display :9` dumps. |
 | `tools/menu_cycles.py [CYCLES] [PID]` | Open and close the tray menu over D-Bus to look for leaks. |
-| `tools/monitor_stability.py [SECONDS] [REPO]` | Count page jumps, app list changes and main-loop stalls on the Monitor tab during disk bursts. Pass another checkout as REPO to compare. |
+| `tools/monitor_stability.py [SECONDS] [REPO] [INTERVAL] [smooth\|plain] [FRAME_MS]` | Count page jumps, app list changes and main-loop stalls on the Monitor tab during disk bursts, with the CPU cost. Pass another checkout as REPO to compare. |
+| `tools/release.sh` | Build and test the release archive from the version's tag. |
 
 Tray screenshots: start `tools/nested-gnome.sh 300 -- --tray`, wait about 30 s, click the icon with
 `tools/click.py 1478 15`, then dump and crop with `xwd` and `tools/xwd2png.py ... 1150 0 450 700`.
 
 Window screenshots for the README: `tools/nested-gnome.sh 300 -- --pages
-overview,usage,monitor,charging,health,system`, then for each tab `tools/capture.sh
+overview,usage,monitor,charging,health,system --size 900x920`, then for each tab `tools/capture.sh
 docs/screenshots/NAME.png` followed by `kill -USR1 $(cat /tmp/chargekeeper-nested/app.pid)`.
 
 ## Releasing
 
 The version is `VERSION` in `chargekeeper/__init__.py` (shown in the About dialog and diagnostics
-report). To release: move the CHANGELOG's "Unreleased" entries under a new version heading with
-the date, set `VERSION`, commit, and tag (`git tag v1.1.0`).
+report). To release:
+
+1. Run every check above and refresh the README screenshots if the UI changed.
+2. Move the CHANGELOG's "Unreleased" entries under a new version heading with the date, set `VERSION`,
+   add `docs/releases/vX.Y.Z.md` (the text for the GitHub release page), and commit.
+3. Tag it (`git tag vX.Y.Z`) and run `tools/release.sh`. It builds
+   `dist/chargekeeper-X.Y.Z.tar.gz` and its checksum from the tag, and runs the tests and the
+   installer's dry run from the unpacked archive.
+4. Push the branch and tag, and attach both files to a GitHub release with the notes from step 2.

@@ -1,8 +1,7 @@
 # Chargekeeper
 
 Battery charge limits, battery health, usage history and a live system monitor for Linux laptops.
-Chargekeeper stops charging at a level you choose (80% by default on most laptops) so the battery
-lasts longer, and shows what is using your battery. It is a GTK 4 / libadwaita app with a tray
+Chargekeeper stops charging at a level you choose so the battery lasts longer, and shows what is using your battery. It is a GTK 4 / libadwaita app with a tray
 icon, a small background service and a command-line tool.
 
 ![Overview](docs/screenshots/overview.png)
@@ -36,7 +35,7 @@ charge to full once, and see the system monitor with the top apps in each catego
 
 | In the top bar | Clicked | Processor opened | Temperatures opened |
 |---|---|---|---|
-| ![Tray icon showing 100%](docs/screenshots/tray-icon.png) | ![Tray menu](docs/screenshots/tray-menu.png) | ![Processor submenu with top apps](docs/screenshots/tray-menu-processor.png) | ![Temperatures submenu](docs/screenshots/tray-menu-temperatures.png) |
+| ![Tray icon showing the battery level](docs/screenshots/tray-icon.png) | ![Tray menu](docs/screenshots/tray-menu.png) | ![Processor submenu with top apps](docs/screenshots/tray-menu-processor.png) | ![Temperatures submenu](docs/screenshots/tray-menu-temperatures.png) |
 
 ## Features
 
@@ -64,6 +63,7 @@ charge to full once, and see the system monitor with the top apps in each catego
 
 **System monitor**
 - Processor, memory, disk and network use with a 2-minute graph and the **top 3 apps** in each.
+- **Update speed menu**: every 0.5, 1, 2 or 5 seconds, with smooth animation between readings.
 - Temperatures: CPU, battery, motherboard, SSD and GPU, plus every sensor the laptop has.
 - Also in the tray menu, with the top apps in a submenu for each category.
 
@@ -101,6 +101,9 @@ is never charged past what you asked for. Known firmware rules are applied autom
 | Lenovo IdeaPad/Legion | conservation mode holds 60–80%, depending on the model |
 | ASUS | the kernel accepts any value, but some models only honour 60%, 80% or 100% |
 
+The reference laptop is an Acer Predator PH315-55. Other makers' firmware rules are checked by tests
+that emulate the kernel, so reports from other laptops are very welcome.
+
 To see what your laptop supports, install Chargekeeper and run `chargekeeper status`, or open the
 Charging tab. The first row names the interface it found.
 
@@ -114,31 +117,52 @@ Charging tab. The first row names the interface it found.
 
 ### Steps
 
-1. Download this repository (or `git clone` it) and open a terminal in its folder.
+1. Download the `.tar.gz` from the [latest release](../../releases/latest) and unpack it, or
+   `git clone` this repository. Open a terminal in the folder.
 2. Run the installer:
 
    ```sh
    sudo ./install.sh
    ```
 
-   It installs any missing dependencies with apt, dnf, pacman or zypper, copies the app to
-   `/usr/lib/chargekeeper`, and starts the background service. On a first install it sets an 85%
-   limit (rounded down to what your laptop supports, for example 80% on Acer).
+   It asks who made your laptop, with the maker your firmware reports already selected:
 
-   **Acer laptops** need an extra driver. Run this instead:
+   ```
+   Which company made this laptop?
+
+       1) Acer (also builds the acer-wmi-battery driver)
+       2) ASUS
+    >  3) Dell
+       ...
+      17) Other or not sure
+
+   Type a number or a name, or press Enter for 3:
+   ```
+
+   To skip the question, name the maker in the command:
 
    ```sh
    sudo ./install.sh --acer
    ```
 
-   This builds [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) at a pinned
-   version with DKMS, so it is rebuilt automatically for new kernels. With **Secure Boot** on, the
-   module must be signed. Ubuntu's DKMS signs it with a machine key; if that key isn't enrolled
-   yet, you're asked for a one-time password and must confirm the key (MOK) on the next reboot.
-   Other distributions need their own module-signing setup.
+   `--asus`, `--dell`, `--framework`, `--gigabyte`, `--hp`, `--huawei`, `--lenovo`, `--lg`,
+   `--microsoft`, `--msi`, `--razer`, `--samsung`, `--sony`, `--system76`, `--toshiba` and `--other`
+   work the same way (`./install.sh --help` lists them). The installer tells you what to expect from
+   that maker, installs any missing dependencies with apt, dnf, pacman or zypper, copies the app to
+   `/usr/lib/chargekeeper`, and starts the background service. On a first install it sets an 85%
+   limit (rounded down to what your laptop supports, for example 80% on Acer).
+
+   **Acer laptops** need an extra driver, so choosing Acer also builds
+   [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) at a pinned version with DKMS,
+   and it is rebuilt automatically for new kernels. With **Secure Boot** on, the module must be
+   signed. Ubuntu's DKMS signs it with a machine key; if that key isn't enrolled yet, you're asked
+   for a one-time password and must confirm the key (MOK) on the next reboot. Other distributions
+   need their own module-signing setup. Run from a script without a terminal, the installer never
+   builds the driver unless you pass `--acer`.
 3. Open **Chargekeeper** from the app menu, or run `chargekeeper`.
 
-To update, download the new version and run `sudo ./install.sh` again. Your settings are kept.
+To update, download the new version and run `sudo ./install.sh` again. Your settings are kept, and
+the menu starts on the maker you chose last time.
 
 ### Tray icon
 
@@ -162,6 +186,17 @@ once** in the tray. The limit comes back by itself.
 **Leaving it plugged in.** When the battery is above the limit, the laptop runs from the charger
 and the battery slowly settles back to the limit. "Plugged in · above the limit" on the Overview is
 normal.
+
+**Change how fast the Monitor updates.** The button at the top right of the **Monitor** tab sets the
+update speed (every 0.5, 1, 2 or 5 seconds) and switches **Smooth animation** on or off. With it on,
+numbers, bars and graphs glide from one reading to the next; the graphs run one update behind real
+time to do that. Processor, memory, disk and network totals follow the speed you pick. The app lists
+stay at every 2 seconds at most, temperatures likewise, and per-app network at every 6 seconds,
+because they cost more to read and hardly change faster. The Power section follows the battery,
+which firmware refreshes on its own schedule. If you've turned animations off for your whole desktop,
+Chargekeeper doesn't animate either.
+
+![The update speed menu on the Monitor tab](docs/screenshots/monitor-speed.png)
 
 **Command line.**
 
@@ -250,7 +285,15 @@ Measured over 10 minutes on an Acer Predator PH315-55 (20 threads), all running 
 | Background service | **0.017%** (0.05 s of CPU in 5 min) | 1 per minute | 11 MB |
 | Tray icon, menu closed | **0.015%** (0.09 s in 10 min) | 1 per minute | 138 MB resident, 50 MB of it its own |
 | Window open, live numbers every 2 s | 0.16% (0.94 s in 10 min) | 50 per minute | 76 MB |
-| Monitor tab or tray menu open | about 1.2–1.4% | only while open | |
+| Tray menu open | about 1.2–1.4% | only while open | |
+| Monitor tab, every 1 s, smooth (the default), during disk bursts | 5.2% | only while open | |
+| Monitor tab, every 1 s, no animation, during disk bursts | 3.7% | only while open | |
+| Monitor tab, every 0.5 s, smooth, during disk bursts | 5.8% | only while open | |
+
+The Monitor speeds are a separate measurement, with the GPU renderer and a small disk burst every 7 s.
+The laptop drew about 18.5 W with the tab open at each speed, with or without animation; the
+differences were within the 0.1 W noise of the battery's own reading. Without a working GPU driver
+the animation drops to about 10 frames a second, and costs more processor time (about 9% of a core).
 
 Together the service and tray use roughly 1–2 milliwatts, around 0.002% of a typical laptop
 battery per hour. Most of the tray's memory is GTK and libadwaita, shared with other GTK apps.
@@ -288,7 +331,7 @@ Precautions:
 - **Calibration takes several hours** and runs the battery from full to empty and back. Keep the
   charger connected, and don't calibrate more than every 2–3 months.
 - **The Acer driver is third-party** (built from source at a pinned version). The installer only
-  builds it when you pass `--acer`.
+  builds it when you choose Acer.
 - The power mode, firmware profile and CPU energy settings on the Settings tab change performance
   and fan behaviour, not charging. TLP or power-profiles-daemon may override them.
 
@@ -341,9 +384,10 @@ you want.
 |---|---|
 | `/usr/lib/chargekeeper/` | the app and `chargekeeper-helper` |
 | `/etc/chargekeeper/config.json` | limit settings (system-wide) |
+| `/etc/chargekeeper/maker` | the maker chosen in the installer, its default next time |
 | `/var/lib/chargekeeper/` | history, health and app usage logs |
 | `/run/chargekeeper/state.json` | service status, read by the app |
-| `~/.config/chargekeeper/prefs.json` | notification and tray preferences (per user) |
+| `~/.config/chargekeeper/prefs.json` | notification, tray and Monitor preferences (per user) |
 | `/usr/share/polkit-1/` | permission policy and rule |
 
 ## Development
