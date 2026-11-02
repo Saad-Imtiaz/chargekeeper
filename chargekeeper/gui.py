@@ -1224,7 +1224,10 @@ class Window(Adw.ApplicationWindow):
             return
 
         def done(p, result):
-            ok = p.wait_check_finish(result) if p else False
+            try:
+                ok = p.wait_check_finish(result)
+            except GLib.Error:      # a failed command raises here rather than returning False
+                ok = False
             self.toast("Tray extension enabled" if ok else "Couldn't enable the extension")
         proc.wait_check_async(None, done)
 
@@ -1296,7 +1299,11 @@ class App(Adw.Application):
         self.live.subscribe(self._on_battery)
         sync_autostart(self.prefs["background"])
         self.set_background(self.prefs["background"])
-        GLib.idle_add(lambda: self._on_battery(self.live.info) and GLib.SOURCE_REMOVE)
+        GLib.idle_add(self._first_reading)
+
+    def _first_reading(self):
+        self._on_battery(self.live.info)
+        return GLib.SOURCE_REMOVE
 
     def _on_battery(self, info):
         if self.tray:
@@ -1407,13 +1414,16 @@ class App(Adw.Application):
         return [p["Profile"] for p in profiles.unpack()], active.unpack()
 
     def set_ppd(self, value):
-        try:
-            self.ppd_proxy.call_sync(
-                "org.freedesktop.DBus.Properties.Set",
-                GLib.Variant("(ssv)", ("net.hadess.PowerProfiles", "ActiveProfile", GLib.Variant("s", value))),
-                Gio.DBusCallFlags.NONE, -1, None)
-        except GLib.Error as exc:
-            self._report(exc.message)
+        def done(proxy, result):
+            try:
+                proxy.call_finish(result)
+            except GLib.Error as exc:
+                self._report(exc.message)
+
+        self.ppd_proxy.call(
+            "org.freedesktop.DBus.Properties.Set",
+            GLib.Variant("(ssv)", ("net.hadess.PowerProfiles", "ActiveProfile", GLib.Variant("s", value))),
+            Gio.DBusCallFlags.NONE, -1, None, done)
 
     # --- notifications ---
 

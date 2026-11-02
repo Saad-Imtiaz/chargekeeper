@@ -423,6 +423,8 @@ class ThresholdBackend(Backend):
         self.supports_start = any(_attr(b, START_NAMES) for b in threshold_bats)
         vendor = dmi("sys_vendor") or "Laptop"
         maker = vendor.lower()
+        self.detail = ("Start and stop thresholds are set in firmware." if self.supports_start
+                       else "The stop threshold is set in firmware.")
         if maker.startswith("dell"):
             # dell-laptop: start 50-95, end 55-100, end at least 5 above start.
             self.min_end, self.min_start, self.min_gap = 55, 50, 5
@@ -436,8 +438,6 @@ class ThresholdBackend(Backend):
             self.min_end, self.min_gap, self.fixed_gap = 20, 10, 10
             self.detail = "MSI firmware resumes charging 10% below the stop threshold."
         self.name = f"{vendor} firmware charge thresholds"
-        self.detail = ("Start and stop thresholds are set in firmware." if self.supports_start
-                       else "The stop threshold is set in firmware.")
 
     def limit(self):
         return read_int(_attr(self.threshold_bats[0], END_NAMES))

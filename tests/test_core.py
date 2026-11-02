@@ -91,6 +91,12 @@ class VendorTests(unittest.TestCase):
         finally:
             core.dmi = original
 
+    def test_maker_notes_are_kept(self):
+        # A later general assignment used to overwrite these.
+        self.assertIn("single fixed 80%", self.backend_for("LG Electronics").detail)
+        self.assertIn("10% below", self.backend_for("Micro-Star International").detail)
+        self.assertIn("stop threshold", self.backend_for("Framework").detail)
+
     def test_lg_and_toshiba_only_80(self):
         for vendor in ("LG Electronics", "TOSHIBA", "Dynabook Inc."):
             backend = self.backend_for(vendor)
