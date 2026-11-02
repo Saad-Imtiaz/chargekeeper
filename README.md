@@ -51,12 +51,16 @@ charge to full once, and see the system monitor with the top apps in each catego
 - **Calibration** on Acer, which switches itself off when done.
 
 **Battery information**
-- Live level, power, time remaining, energy and temperature, updated as they change.
+- Live level, time remaining, energy and temperature, updated as they change.
+- **Where the power goes**: how much comes from the charger, how much from the battery (or goes
+  into it) and what the laptop uses, on the Overview and the Monitor tab. Figures the laptop can't
+  measure are marked (see [Charger power](#charger-power)).
 - Health: full-charge capacity against design capacity, wear, charge cycles, and a daily health
   history.
-- Charts of charge level (with plugged-in periods) and power draw over 6 hours, 24 hours or 7 days.
+- Charts of charge level (with plugged-in periods) and battery power, with drawing from it and
+  charging it in separate colours, over 6 hours, 24 hours or 7 days.
 - Usage: time on battery, battery and energy used, average power, how long a full charge lasts,
-  and which apps used the most processor time while on battery.
+  energy put into the battery, and which apps used the most processor time while on battery.
 
 **System monitor**
 - Processor, memory, disk and network use with a 2-minute graph and the **top 3 apps** in each.
@@ -165,7 +169,9 @@ normal.
 $ chargekeeper status
 Battery     BAT1  100%  Full
 Adapter     plugged in
-Power       0.0 W
+Charger     ≈ 25 W  (estimate: no charger sensor)
+Battery out 0 W
+Laptop uses ≈ 25 W
 Health      113%  (98.4 of 87.4 Wh design)
 Temperature 23.9 °C
 
@@ -197,6 +203,19 @@ the status.
 - The **background service** re-applies your settings after boot, resume and charger changes (some
   firmware forgets them), enforces the limit on laptops without a firmware threshold, records
   history once a minute, and stops calibration and charge-to-full when they're done.
+
+### Charger power
+
+The battery reports its own power, so "from battery" and "into battery" are measurements. Chargers
+are different: most laptops only tell Linux whether one is connected, and on USB-C the kernel's
+voltage and current are the negotiated contract, not what's flowing. Chargekeeper shows:
+
+- **A measured figure** when the charger really has a sensor.
+- **≈ (an estimate)** otherwise: your typical draw on battery (the median over the last week) plus
+  whatever is going into the battery. It doesn't follow your current load, so gaming on the charger
+  will draw more than it says.
+- **≥ (at least)** while charging with fewer than 10 minutes of history on battery, because the
+  charger is supplying at least what the battery is taking.
 
 ### Live readings without wasting battery
 
@@ -330,7 +349,7 @@ you want.
 ## Development
 
 ```sh
-python3 -m unittest discover tests     # 46 tests, no root needed
+python3 -m unittest discover tests     # no root needed
 tools/run_app.py                       # run the app from the source tree
 tools/run_app.py --tray                # ...in background mode with the tray icon
 tools/soak.sh 600                      # CPU, wakeups and memory over 10 minutes

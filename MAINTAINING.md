@@ -67,19 +67,27 @@ Each line names where the code lives. Keep this list complete.
 - Settings re-applied after boot, resume (`data/chargekeeper-resume`) and charger changes (events).
 
 **Battery information** (`core.py`, `power.py`, `gui.py`)
-- Live level, power, time remaining, energy, temperature. Event-driven, polled only while shown.
+- Live level, time remaining, energy, temperature. Event-driven, polled only while the Overview or
+  Monitor tab is on screen.
+- Power flow: from charger, from or into battery, laptop use; measured, estimated or lower bound.
+  `core.power_flow`, `core.charger_power`, `core.typical_draw`, `gui.PowerFlow`, tray status, CLI.
 - Time remaining from a 3-minute power average; "at the current load" hint; charging time with the
   slowdown above 80%. `power.Estimator`, `core.time_remaining`
 - Health: capacity versus design, wear, cycles, daily health history chart.
-- History charts: charge level with plugged-in periods, power draw (6 h, 24 h, 7 days).
+- History charts: charge level with plugged-in periods, battery power split into drawing and
+  charging (6 h, 24 h, 7 days). `core.power_series`
 - Usage tab: time and energy on battery, average power, runtime of a full charge, time on the
-  charger, top apps by processor time on battery (sampled by the service only while on battery).
+  charger, energy into the battery, top apps by processor time on battery with app names and icons
+  (sampled by the service only while on battery).
 
 **System monitor** (`monitor.py`, `monitor_page.py`, `tray.py`)
 - Processor, memory (private memory per app), disk and network with sparklines and top 3 apps.
 - Temperatures: CPU, battery, motherboard, SSD, GPU tiles plus every sensor; per-reading
   classification for mixed embedded-controller chips.
-- Sampling every 2 s only while the Monitor tab is visible.
+- Sampling every 2 s only while the Monitor tab is visible, in a short-lived worker thread.
+- A page that holds still: fixed layout, steady top-app lists (`monitor.TopTracker`), averaged
+  headline numbers, round sparkline scales with a label (`monitor.nice_ceiling`), a gap in the line
+  after time away.
 
 **Tray** (`tray.py`)
 - Battery icon and percentage label; menu with status, limit radios, Charge to full once, System
@@ -165,6 +173,18 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
     aubergine, invisible on dark cards). Use explicit hex values with light and dark variants.
 25. **Custom symbolic icons need a theme root**, not a plain icon folder, or GTK won't recolour them.
 26. **Always check that every icon name exists** (`temperature-symbolic` didn't).
+41. **Live data must not change the layout.** Hiding empty rows resized all four homogeneous Monitor
+    cards and moved everything below them, every time an app started or stopped using the disk. Keep
+    the rows and blank them (`set_opacity(0)`), give changing numbers `width_chars`, and give cards a
+    minimum width, or a longer number can flip a `FlowBox`'s column count. Check with
+    `tools/monitor_stability.py`.
+42. **Rankings of nearly equal values need hysteresis.** Apps taking turns reshuffled the top-3 list
+    every 2 seconds. Average over time and overtake only with a clear lead (`monitor.TopTracker`).
+43. **Read sensors off the main thread on anything that repeats.** Two NVMe drives took 68 ms every
+    30 s, which stalled scrolling. The Monitor tab samples in a short-lived thread and only touches
+    GTK from the `idle_add` that delivers the result (which returns `SOURCE_REMOVE`, rule 1).
+44. **Don't touch a widget that didn't change.** Removing and re-adding the same CSS class restyles
+    it, and `set_from_gicon` queues a resize even with the same icon. Compare first.
 
 ### Tray (GNOME AppIndicator extension)
 
@@ -183,6 +203,14 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 32. **Prove an estimator better before shipping it.** The first "smart" time estimate (blended
     averages plus last week's history) was no better than a 1-minute average; simulation picked a
     plain 3-minute average. `EstimatorAccuracyTests` fails if accuracy regresses. (`47ea86b`)
+38. **Never present what the hardware doesn't measure as a measurement.** Barrel adapters only report
+    online/offline, and UCSI's USB-C voltage and current are the negotiated contract. Charger power
+    comes from a real sensor (`power_now`, hwmon `power1_input`) or is labelled ≈ or ≥ on screen.
+    Don't read RAPL for this: it's root-only by design (PLATYPUS) and misses the screen and GPU.
+39. **A chart's line-break rule has to fit its sample rate.** The zoom-based gap on the 30-day health
+    chart (9 h) was shorter than its daily samples, so the line never drew at all. Pass `max_gap`.
+40. **One bad line must not lose the rest of a log.** A single `ValueError` ended `load_history`, so
+    a line cut short by a power failure hid everything recorded after it. Catch per row.
 
 ### Testing and tooling
 
@@ -202,7 +230,8 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 1. `python3 -m unittest discover tests`: all pass. Add a test for every bug fixed and feature added.
 2. Run the change from source: `tools/run_app.py` (window) or `tools/run_app.py --tray`.
 3. If it touches the UI: look at it in a real GNOME Shell (`tools/nested-gnome.sh`), in dark and
-   light, wide and narrow.
+   light, wide and narrow. If it touches the Monitor tab: `tools/monitor_stability.py` must report
+   0 page jumps.
 4. If it touches timers, polling, reading, the tray or the service: `tools/soak.sh 600` before and
    after the change. The expected baseline on the reference laptop (Acer Predator PH315-55): tray
    about 0.015–0.02% of one core, service about 0.017%, each 1 wakeup a minute, memory flat. A
@@ -226,6 +255,7 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 | `tools/click.py X Y [hover]` | Click on `:9` only. The tray icon is at about (1478, 15). |
 | `tools/xwd2png.py IN.xwd OUT.png [X Y W H]` | Convert `xwd -root -display :9` dumps. |
 | `tools/menu_cycles.py [CYCLES] [PID]` | Open and close the tray menu over D-Bus to look for leaks. |
+| `tools/monitor_stability.py [SECONDS] [REPO]` | Count page jumps, app list changes and main-loop stalls on the Monitor tab during disk bursts. Pass another checkout as REPO to compare. |
 
 Tray screenshots: start `tools/nested-gnome.sh 300 -- --tray`, wait about 30 s, click the icon with
 `tools/click.py 1478 15`, then dump and crop with `xwd` and `tools/xwd2png.py ... 1150 0 450 700`.

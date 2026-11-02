@@ -18,6 +18,41 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.0.0)
 
+### 2026-11-02: Power from charger and battery, and a Monitor tab that holds still (19b6098)
+- **Added:** a Power section on the Overview and Monitor tabs: from charger, from or into battery,
+  laptop use. Also in the tray status and `chargekeeper status`. The battery figure is measured.
+  Without a charger sensor, which most laptops lack, the charger figure is marked ≈ (typical draw on
+  battery plus charging power) or ≥ (a lower bound).
+- **Changed:** the power chart separates drawing from the battery and charging it. Usage shows energy
+  put into the battery, plus real app names and icons. "Charge to full once" is the one name
+  everywhere and only stands out while plugged in. The tray setting moved out of Notifications.
+- **Fixed (Monitor):** the page jumped whenever an app started or stopped using the disk or network,
+  because empty rows were hidden and that resized all four cards. Rows now keep their space, numbers
+  have fixed widths, and sampling moved off the main thread (reading two NVMe sensors took 68 ms).
+  Headline numbers are lightly averaged; graph scales snap to labelled round numbers; coming back to
+  the tab starts a new measurement. A small app no longer fills its bar on an idle laptop.
+- **Fixed:** the health chart never drew its line. A broken history line hid everything after it. Any
+  paused charge said "fully charged". A sensor that stopped answering left a frozen number. The
+  window polled while minimized and on tabs with no live numbers. Half-step axis labels were wrong
+  (2.5 W showed as 2 W). The tray said "held at 80%" when the battery was at 78%.
+- **Measured:** `tools/monitor_stability.py` (new), 70 s of disk bursts, old → new: page jumps 7 → 0,
+  top-app list changes 32 → 9, main-loop stalls over 16 ms 10 → 2, CPU 5.85% → 3.48% of one core.
+  `tools/soak.sh 600`, on battery: tray 0.0233% → 0.0183%, service 0.0283% → 0.0233%, memory flat.
+  The soak difference is within run-to-run noise; the point is that nothing got worse.
+- **Lesson:** live data must not change the layout; rankings need hysteresis; never show an unmeasured
+  value as measured. Rules 38–44.
+
+### 2026-11-02: Small fixes from a review (557de64)
+- **Fixed:** the LG/Toshiba and MSI notes on the Charging tab were overwritten by the general text. A
+  failed tray-extension enable showed no message. Changing the power mode blocked the window on a
+  D-Bus call. The desktop file listed two main categories.
+
+### 2026-11-02: Steady top-app lists and sensor fixes (b34eff4)
+- **Changed:** top apps are averaged over time and only overtake with a clear lead, in the window and
+  the tray. The SSD tile shows the hottest drive.
+- **Fixed:** two identical drives shared one row under All sensors. Names cut to 15 characters by the
+  kernel (`gnome-system-mo`) now match their app.
+
 ### 2026-10-31: Maintenance guide, changelog and test tools
 - **Added:** MAINTAINING.md (architecture, feature list, rules learned, pre-commit checks),
   this changelog, CLAUDE.md, and `tools/` (run from source, soak test, nested GNOME Shell,

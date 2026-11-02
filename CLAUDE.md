@@ -4,7 +4,7 @@ Battery charge-limit and monitoring app for Linux laptops (Python, GTK 4 / libad
 via polkit, systemd service).
 
 Before changing anything, read [MAINTAINING.md](MAINTAINING.md): architecture, the feature list,
-37 rules learned from real bugs in this project, and the checks to run before every commit.
+44 rules learned from real bugs in this project, and the checks to run before every commit.
 History is in [CHANGELOG.md](CHANGELOG.md).
 
 - Tests: `python3 -m unittest discover tests` (no root, no display).
