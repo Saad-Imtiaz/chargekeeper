@@ -33,9 +33,104 @@ class SsTests(unittest.TestCase):
         self.assertAlmostEqual(apps[0][1], 5000, delta=50)
 
 
+class TopTrackerTests(unittest.TestCase):
+    def test_first_reading_is_used_as_is(self):
+        tracker = monitor.TopTracker()
+        self.assertEqual(tracker.update({"a": 5.0, "b": 9.0}, 0), [("b", 9.0), ("a", 5.0)])
+
+    def test_apps_taking_turns_do_not_reshuffle(self):
+        """The bug: nearly equal apps swapped rows on every sample."""
+        tracker = monitor.TopTracker(floor=0.05)
+        names = ["firefox", "shell", "claude", "xorg"]
+        orders = []
+        for tick in range(60):
+            # Each app is busy in turn, so the instantaneous ranking changes every sample.
+            current = {name: (8.0 if tick % 4 == i else 2.0) for i, name in enumerate(names)}
+            orders.append([n for n, _ in tracker.update(current, 2)])
+        settled = orders[10:]
+        changes = sum(a != b for a, b in zip(settled, settled[1:]))
+        self.assertLessEqual(changes, 2)
+
+    def test_a_clear_winner_overtakes(self):
+        tracker = monitor.TopTracker()
+        tracker.update({"a": 10.0, "b": 8.0}, 0)
+        for _ in range(20):
+            shown = tracker.update({"a": 10.0, "b": 30.0}, 2)
+        self.assertEqual(shown[0][0], "b")
+
+    def test_a_newcomer_replaces_the_weakest_only_with_a_lead(self):
+        tracker = monitor.TopTracker(n=2)
+        tracker.update({"a": 10.0, "b": 8.0}, 0)
+        for _ in range(20):
+            shown = tracker.update({"a": 10.0, "b": 8.0, "c": 8.5}, 2)
+        self.assertEqual([n for n, _ in shown], ["a", "b"])
+        for _ in range(20):
+            shown = tracker.update({"a": 10.0, "b": 8.0, "c": 20.0}, 2)
+        self.assertEqual(shown[0][0], "c")
+        self.assertEqual(len(shown), 2)
+
+    def test_a_steady_small_app_reaches_the_list(self):
+        tracker = monitor.TopTracker(floor=1.0)
+        tracker.update({"a": 50.0}, 0)
+        for _ in range(10):
+            shown = tracker.update({"a": 50.0, "small": 2.0}, 2)
+        self.assertIn("small", [n for n, _ in shown])
+
+    def test_an_app_that_stops_fades_out_and_is_forgotten(self):
+        tracker = monitor.TopTracker(floor=1.0)
+        tracker.update({"burst": 100.0}, 0)
+        self.assertEqual(tracker.update({}, 2)[0][0], "burst")      # stays for now: no flicker
+        for _ in range(30):
+            shown = tracker.update({}, 2)
+        self.assertEqual(shown, [])
+        self.assertEqual(tracker.values, {})
+
+    def test_a_long_pause_trusts_the_new_values(self):
+        tracker = monitor.TopTracker()
+        tracker.update({"old": 50.0}, 0)
+        self.assertAlmostEqual(tracker.update({"old": 1.0}, 3600)[0][1], 1.0)
+
+
+class ScaleTests(unittest.TestCase):
+    def test_nice_ceiling(self):
+        cases = {0.3: 0.5, 1: 1, 1.1: 2, 2: 2, 3: 5, 5: 5, 7: 10, 10: 10, 110: 200, 1234567: 2000000}
+        for value, expected in cases.items():
+            self.assertAlmostEqual(monitor.nice_ceiling(value, 0.1), expected)
+        self.assertEqual(monitor.nice_ceiling(0, 10000), 10000)
+
+    def test_scale_holds_still_under_noise(self):
+        tops = {monitor.nice_ceiling(v * 1000) for v in (2100, 2900, 3700, 4400, 4900)}
+        self.assertEqual(tops, {5000000})
+
+    def test_average(self):
+        average = monitor.Average(4)
+        self.assertEqual(average.update(10, 0), 10)
+        self.assertLess(average.update(50, 2), 30)      # a single spike is damped
+        for _ in range(20):
+            value = average.update(50, 2)
+        self.assertAlmostEqual(value, 50, places=0)
+
+
+class MonitorRestartTests(unittest.TestCase):
+    def test_restart_forgets_rates_and_rankings(self):
+        m = monitor.Monitor()
+        m.sample()
+        m.trackers["cpu"].update({"a": 1.0}, 0)
+        m.restart()
+        self.assertIsNone(m.prev)
+        self.assertEqual(m.trackers["cpu"].values, {})
+        self.assertEqual(m.sample()["cpu_pct"], 0.0)    # the first sample after it is the baseline
+
+
 class SelectionTests(unittest.TestCase):
     def sensor(self, name, chip, kind, label, value):
         return {"name": name, "chip": chip, "kind": kind, "label": label, "value": value}
+
+    def test_hottest_drive_is_shown(self):
+        sensors = [self.sensor("nvme", "Cool", "storage", "Composite", 35),
+                   self.sensor("nvme", "Hot", "storage", "Composite", 61)]
+        tile = {t[0]: t for t in monitor.highlights(sensors, None)}["storage"]
+        self.assertEqual(tile[2:], (61, "Hot"))
 
     def test_highlights(self):
         sensors = [

@@ -7,6 +7,7 @@ counters reported by `ss`, so UDP (including QUIC) is not attributed.
 """
 
 import glob
+import math
 import os
 import re
 import time
@@ -111,17 +112,92 @@ class Names:
         self.cache = {k: v for k, v in self.cache.items() if k in alive}
 
 
+def nice_ceiling(value, floor=1.0):
+    """The next round number (1, 2 or 5 x 10^n) at or above value, for a steady chart scale."""
+    value = max(value, floor, 1e-9)
+    magnitude = 10 ** math.floor(math.log10(value))
+    for step in (1, 2, 5, 10):
+        if value <= step * magnitude * (1 + 1e-9):
+            return step * magnitude
+    return 10 * magnitude
+
+
+class Average:
+    """Exponential average over time, for a displayed number that shouldn't flicker."""
+
+    def __init__(self, tau):
+        self.tau, self.value = tau, None
+
+    def update(self, value, dt):
+        if self.value is None:
+            self.value = value
+        else:
+            self.value += (1 - math.exp(-max(dt, 0) / self.tau)) * (value - self.value)
+        return self.value
+
+
+class TopTracker:
+    """A steady "top apps" list.
+
+    Per-sample rankings reshuffled every two seconds because apps that take turns are
+    nearly equal. Each app's value is averaged over time, an app stays until it fades
+    below `floor`, and it only overtakes another with a clear lead.
+    """
+
+    TAU = 6.0
+    LEAD = 1.25
+
+    def __init__(self, floor=0.0, n=3):
+        self.floor, self.n = floor, n
+        self.values = {}
+        self.shown = []
+
+    def update(self, current, dt):
+        """current: {name: value}. Returns [(name, smoothed value)], at most n."""
+        alpha = 1 - math.exp(-max(dt, 0) / self.TAU)
+        first = not self.values
+        values = {}
+        for name in set(self.values) | set(current):
+            new = current.get(name, 0.0)
+            value = new if first else self.values.get(name, 0.0) * (1 - alpha) + new * alpha
+            # New apps build up from zero, so judge those by their current value.
+            if value >= self.floor or new >= self.floor:
+                values[name] = value
+        self.values = values
+        shown = [name for name in self.shown if values.get(name, -1) >= self.floor]
+        waiting = sorted((n for n, v in values.items() if v >= self.floor and n not in shown),
+                         key=lambda n: -values[n])
+        for name in waiting:
+            if len(shown) < self.n:
+                shown.append(name)
+            elif values[name] > values[shown[-1]] * self.LEAD:
+                shown[-1] = name
+        for i in range(1, len(shown)):
+            while i > 0 and values[shown[i]] > values[shown[i - 1]] * self.LEAD:
+                shown[i - 1], shown[i] = shown[i], shown[i - 1]
+                i -= 1
+        self.shown = shown
+        return [(name, values[name]) for name in shown]
+
+
 class Monitor:
+    # Below these an app isn't doing anything worth listing.
+    FLOORS = {"cpu": 0.05, "mem": 1.0, "disk": 1024.0, "net": 256.0}
+
     def __init__(self):
         self.hz = os.sysconf("SC_CLK_TCK")
         self.page = os.sysconf("SC_PAGE_SIZE")
         self.ncpu = os.cpu_count() or 1
         self.uid = os.getuid()
         self.names = Names()
-        self.prev = None
-        self.prev_sockets = None
-        self.prev_ss_time = None
         self.pid_names = {}
+        self.restart()
+
+    def restart(self):
+        """Forget the last reading: after a pause, rates since then would mean nothing."""
+        self.prev = None
+        self.prev_sockets = self.prev_ss_time = None
+        self.trackers = {kind: TopTracker(floor) for kind, floor in self.FLOORS.items()}
 
     # --- system totals ---
 
@@ -222,11 +298,11 @@ class Monitor:
         for name, _ticks, rss, _io, _started in procs.values():
             if rss:
                 mem_by[name] = mem_by.get(name, 0) + rss
-        result["top_mem"] = top(mem_by)
+        dt = max(now - self.prev[0], 0.001) if self.prev else 0.0
+        result["top_mem"] = self.trackers["mem"].update(mem_by, dt)
 
         if self.prev:
-            p_now, p_total, p_idle, p_disk, p_net, p_procs = self.prev
-            dt = max(now - p_now, 0.001)
+            _p_now, p_total, p_idle, p_disk, p_net, p_procs = self.prev
             span = max(total - p_total, 1)
             result["cpu_pct"] = 100 * (span - (idle - p_idle)) / span
             result["disk_read"] = max(0, disk[0] - p_disk[0]) / dt
@@ -246,8 +322,8 @@ class Monitor:
                     rate = (max(0, io[0] - before[3][0]) + max(0, io[1] - before[3][1])) / dt
                     if rate:
                         disk_by[name] = disk_by.get(name, 0) + rate
-            result["top_cpu"] = top(cpu_by)
-            result["top_disk"] = top(disk_by)
+            result["top_cpu"] = self.trackers["cpu"].update(cpu_by, dt)
+            result["top_disk"] = self.trackers["disk"].update(disk_by, dt)
 
         self.prev = (now, total, idle, disk, net, procs)
         self.pid_names = {pid: p[0] for pid, p in procs.items()}
@@ -272,7 +348,7 @@ class Monitor:
                 if rate:
                     name = self.pid_names.get(pid) or f"pid {pid}"
                     by_app[name] = by_app.get(name, 0) + rate
-            result = top(by_app)
+            result = self.trackers["net"].update(by_app, dt)
         self.prev_sockets, self.prev_ss_time = sockets, now
         return result
 
@@ -294,10 +370,6 @@ def parse_ss(text):
         sockets[(parts[2], parts[3])] = (int(user.group(1)), int(counters.get("bytes_acked", 0)),
                                          int(counters.get("bytes_received", 0)))
     return sockets
-
-
-def top(values, n=3):
-    return sorted(values.items(), key=lambda item: -item[1])[:n]
 
 
 # --- temperatures ------------------------------------------------------------
@@ -330,7 +402,7 @@ _slow_cache = {}
 
 
 def sensors():
-    """Every temperature sensor: [{chip, name, label, kind, value}]."""
+    """Every temperature sensor: [{chip, name, label, kind, value, path}]."""
     out = []
     for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
         name = core.read(hwmon + "/name") or ""
@@ -357,7 +429,8 @@ def _read_chip(hwmon, name, first_only=False):
             continue
         label = core.read(path.replace("_input", "_label")) or ""
         kind = chip_kind or classify(label)
-        out.append({"chip": chip, "name": name, "label": label, "kind": kind, "value": milli / 1000})
+        out.append({"chip": chip, "name": name, "label": label, "kind": kind, "value": milli / 1000,
+                    "path": path})
     return out
 
 
@@ -399,7 +472,10 @@ def highlights(all_sensors, battery_temp):
     board = pick_board(all_sensors)
     tiles.append(("board", "Motherboard", board["value"] if board else None,
                   (board["chip"] + (f" · {board['label']}" if board["label"] else "")) if board else "No sensor found"))
-    storage = pick("storage", ("Composite",))
+    # Of several drives show the hottest: that's the one that could need attention.
+    drives = [s for s in all_sensors if s["kind"] == "storage"]
+    composite = [s for s in drives if s["label"] == "Composite"] or drives
+    storage = max(composite, key=lambda s: s["value"]) if composite else None
     if storage:
         tiles.append(("storage", "SSD", storage["value"], storage["chip"]))
     gpu = pick("gpu", ("edge", "junction"))
@@ -455,7 +531,8 @@ def app_identity(name):
                 (info.get_string("StartupWMClass") or "").lower(),
                 stem, stem.split("_")[-1], stem.split(".")[-1],
             }
-            if wanted in candidates:
+            # The kernel cuts process names at 15 characters (gnome-system-mo).
+            if wanted in candidates or (len(wanted) == 15 and any(c.startswith(wanted) for c in candidates)):
                 result = (info.get_display_name() or name, info.get_icon() or result[1])
                 break
     _apps[name] = result
