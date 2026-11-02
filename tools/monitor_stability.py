@@ -1,11 +1,12 @@
 #!/usr/bin/python3 -I
 """Count what moves on the Monitor tab while the disk is busy in bursts.
 
-    tools/monitor_stability.py [SECONDS] [REPO]    default 60 s, this source tree
+    tools/monitor_stability.py [SECONDS] [REPO] [INTERVAL] [smooth|plain] [FRAME_MS]
+                                    default 60 s, this source tree, the app's default speed
 
 Run it inside the nested shell (DISPLAY=:9 and its bus, see nested-gnome.sh), with
 XDG_CONFIG_HOME pointing at a scratch folder. Pass another checkout as REPO to compare
-before and after a change. The temperature grid should move 0 times and the card height
+before and after a change. Pass an update speed to measure its cost. The temperature grid should move 0 times and the card height
 should stay one value; every move is the whole page jumping under the reader's eyes.
 """
 
@@ -36,6 +37,10 @@ class App(gui.App):
         super().__init__()
         self.set_application_id("dev.chargekeeper.Stability")
         self.prefs["background"] = False
+        if len(sys.argv) > 3:
+            self.prefs["monitor_interval"] = float(sys.argv[3])
+        if len(sys.argv) > 4:
+            self.prefs["monitor_smooth"] = sys.argv[4] == "smooth"
 
     def do_activate(self):
         if not self.window:
@@ -48,6 +53,9 @@ class App(gui.App):
         self.prefs[key] = value
 
 
+if len(sys.argv) > 5:
+    from chargekeeper import monitor_page  # noqa: E402
+    monitor_page.FRAME_MS = monitor_page.SOFTWARE_FRAME_MS = int(sys.argv[5])
 app = App()
 
 
@@ -95,6 +103,8 @@ def burst():
 
 
 def finish():
+    with open("/proc/self/status") as f:
+        print(next(line for line in f if line.startswith("VmRSS")).strip())
     elapsed = time.monotonic() - seen["start"]
     cpu = 100 * (sum(os.times()[:2]) - seen["cpu"]) / elapsed
     print(f"page jumps {seen['moves']}, card heights {sorted(seen['heights'])}, app list changes "

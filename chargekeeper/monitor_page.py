@@ -1,10 +1,15 @@
 """The Monitor page: live CPU, memory, disk and network with top apps, plus temperatures.
 
-Sampling runs only while the page is on screen, every INTERVAL seconds, in a short-lived
-thread: reading sensors can take tens of milliseconds, which would stall scrolling.
+Sampling runs only while the page is on screen, at the speed chosen in the page's menu, in
+a short-lived thread: reading sensors can take tens of milliseconds, which would stall
+scrolling. Only the cheap system totals follow the fastest speeds (see monitor.py).
 
 The page is built not to move: every card reserves room for its three app rows, numbers
 have fixed widths, and displayed values are averaged a little (the sparklines stay raw).
+
+With smooth animation on, a light timer glides numbers, bars and charts from one reading to
+the next. The charts run one update behind real time, so the next point is already drawn,
+just past the right edge, and slides into view. The timer stops with the sampling.
 """
 
 import collections
@@ -19,13 +24,13 @@ from . import core, monitor
 from .monitor import app_identity
 from .gui import PALETTE, Painter, PowerFlow
 
-INTERVAL = 2
-HISTORY = 60                 # samples kept for the sparklines (2 minutes)
-NETWORK_EVERY = 3            # run `ss` every third tick
-TEMPS_EVERY = 2
+# Enough for the chart's two minutes at the fastest speed.
+MAX_POINTS = int(monitor.CHART_WINDOW / min(monitor.INTERVALS)) + 4
 FIRST_READING = 1.0          # seconds between the two samples a first rate needs
-MAX_GAP = 3 * INTERVAL       # away longer than this (other tab, minimized): start over
-NUMBER_TAU = 4.0             # seconds; averaging of the large numbers
+MAX_GAP = 6.0                # away longer than this (other tab, minimized): start over
+FRAME_MS = 33                # smooth animation: about 30 frames a second
+SOFTWARE_FRAME_MS = 100      # without a GPU painting is the cost: 21% of a core at 30, 9% at 10
+SCALE_GLIDE = 0.4            # seconds for a chart's scale to change
 TEMP_TAU = 8.0               # CPU temperature swings by 15 °C within a second
 
 CSS = """
@@ -112,54 +117,85 @@ def add_icon_path():
 # --- widgets ---------------------------------------------------------------------
 
 class Sparkline(Gtk.Widget):
-    """An area chart of the last HISTORY samples, with an optional second series.
+    """An area chart of the last two minutes, with an optional second series.
 
     Without a fixed top the scale snaps to round numbers (and says which), so it stays put
     instead of rescaling with every sample. None in a series is a gap: the page was closed.
+    `delay` above 0 is smooth mode: the chart draws that far behind the clock.
     """
 
     def __init__(self, color, fixed_max=None, floor=1.0, height=46, scale_text=None):
-        super().__init__(hexpand=True, vexpand=True)
+        super().__init__(hexpand=True, vexpand=True, overflow=Gtk.Overflow.HIDDEN)
         self.set_size_request(120, height)
         self.color, self.fixed_max, self.floor, self.scale_text = color, fixed_max, floor, scale_text
-        self.a = collections.deque(maxlen=HISTORY)
-        self.b = collections.deque(maxlen=HISTORY)
+        self.times = collections.deque(maxlen=MAX_POINTS)
+        self.a = collections.deque(maxlen=MAX_POINTS)
+        self.b = collections.deque(maxlen=MAX_POINTS)
+        self.delay = 0.0
+        self.scale = monitor.Glide()
+        self.target = self.key = self.lines_node = self.frame_node = None
 
     def push(self, a, b=None):
+        self.times.append(time.monotonic())
         self.a.append(a)
         self.b.append(b)
         self.queue_draw()
 
     def do_snapshot(self, snapshot):
         w, h = self.get_width(), self.get_height()
-        if w < 4 or h < 4:
+        if w < 4 or h < 4 or not self.times:
             return
-        p = Painter(self, snapshot)
-        peak = max((v for series in (self.a, self.b) for v in series if v is not None), default=0)
-        top = self.fixed_max or monitor.nice_ceiling(peak, self.floor)
-        step = w / (HISTORY - 1)
+        clock = time.monotonic()
+        last = self.times[-1]
+        now = clock - self.delay if self.delay else last
+        first = now - monitor.CHART_WINDOW
+        peak = max((v for series in (self.a, self.b) for t, v in zip(self.times, series)
+                    if v is not None and t >= first), default=0)
+        target = self.fixed_max or monitor.nice_ceiling(peak, self.floor)
+        if target != self.target:
+            self.target = target
+            self.scale.to(target, clock, SCALE_GLIDE if self.delay else 0)
+        top = self.scale.at(clock)
 
-        def lines(series):
-            out, current = [], []
-            start = HISTORY - len(series)
-            for i, v in enumerate(series):
-                if v is None:
-                    out.append(current)
-                    current = []
-                else:
-                    current.append(((start + i) * step, h - 1 - (h - 2) * min(v, top) / top))
-            out.append(current)
-            return [line for line in out if len(line) >= 2]
+        # Building the paths point by point takes most of a frame's time (20% of a core at
+        # 30 frames a second). The drawing only changes with a new sample or a new scale;
+        # between those a frame just moves it. The newest point starts past the right edge.
+        key = (w, h, top, last, self.get_color().to_string())
+        if key != self.key:
+            self.key = key
+            self.lines_node = self._draw_lines(w, h, top, last)
+            self.frame_node = self._draw_frame(w, h, target)
+        snapshot.append_node(self.frame_node)
+        if self.lines_node is not None:
+            snapshot.save()
+            snapshot.translate(Graphene.Point().init(w * (last - now) / monitor.CHART_WINDOW, 0))
+            snapshot.append_node(self.lines_node)
+            snapshot.restore()
 
-        p.stroke([(0, h - 0.5), (w, h - 0.5)], 1, None, 0.08)
-        for line in lines(self.b):
+    def _draw_lines(self, w, h, top, last):
+        snap = Gtk.Snapshot()
+        p = Painter(self, snap)
+        for line in monitor.chart_lines(self.times, self.b, last, w, h, top):
             p.stroke(line, 1.5, self.color, 0.55, dash=[3, 3])
-        for line in lines(self.a):
+        for line in monitor.chart_lines(self.times, self.a, last, w, h, top):
             p.fill(line + [(line[-1][0], h), (line[0][0], h)], self.color, 0.16)
             p.stroke(line, 2, self.color)
+        return snap.to_node()
+
+    def _draw_frame(self, w, h, target):
+        snap = Gtk.Snapshot()
+        p = Painter(self, snap)
+        p.stroke([(0, h - 0.5), (w, h - 0.5)], 1, None, 0.08)
         if self.scale_text:
-            layout, _size = p.layout(self.scale_text(top), 8)
+            layout, _size = p.layout(self.scale_text(target), 8)
             p.text(layout, 0, 0, alpha=0.55)
+        return snap.to_node()
+
+
+def set_text(label, text):
+    """Rule 44: don't touch a widget that didn't change. The animation asks 30 times a second."""
+    if label.get_label() != text:
+        label.set_label(text)
 
 
 def thin_bar(extra=None):
@@ -182,10 +218,13 @@ class AppLine(Gtk.Grid):
         self.attach(self.bar, 1, 1, 2, 1)
         self.app = None
         self.fraction = 0.0
+        self.spoken = None
+        self.glide = monitor.Glide()
         self.clear()
 
-    def set(self, name, value, fraction):
+    def set(self, name, value, fraction, now, duration=0.0):
         if name != self.app:
+            duration = 0.0      # another app in this row: its bar doesn't grow out of the last one's
             self.app = name
             display, icon = app_identity(name)
             self.icon.set_from_gicon(icon)
@@ -193,11 +232,18 @@ class AppLine(Gtk.Grid):
             self.name.set_tooltip_text(display if display == name else f"{display} ({name})")
             self.set_opacity(1)
         self.value.set_label(value)
-        fraction = max(0.0, min(1.0, fraction))
-        if abs(fraction - self.fraction) >= 0.005:     # no redraw for a change nobody can see
+        self.glide.to(max(0.0, min(1.0, fraction)), now, duration)
+        self.animate(now)
+        spoken = f"{self.name.get_label()}: {value}"
+        if spoken != self.spoken:
+            self.spoken = spoken
+            self.update_property([Gtk.AccessibleProperty.LABEL], [spoken])
+
+    def animate(self, now):
+        fraction = self.glide.at(now)
+        if fraction is not None and abs(fraction - self.fraction) >= 0.005:     # no redraw for a change nobody can see
             self.fraction = fraction
             self.bar.set_value(fraction)
-        self.update_property([Gtk.AccessibleProperty.LABEL], [f"{self.name.get_label()}: {value}"])
 
     def clear(self):
         """Blank but still taking up its space, so the card doesn't change height."""
@@ -207,6 +253,8 @@ class AppLine(Gtk.Grid):
         self.name.set_label("")
         self.name.set_tooltip_text(None)
         self.value.set_label("")
+        self.glide = monitor.Glide()
+        self.spoken = ""
         self.update_property([Gtk.AccessibleProperty.LABEL], [""])
 
 
@@ -272,16 +320,22 @@ class MetricCard(Gtk.Box):
 
     def set_legend(self, *values):
         for (label, text), value in zip(self.legend, values):
-            text.set_label(f"{label} {value}")
+            set_text(text, f"{label} {value}")
 
-    def set_apps(self, apps):
+    def animate(self, now):
+        for line in self.lines:
+            if line.app is not None:
+                line.animate(now)
+
+    def set_apps(self, apps, now, duration=0.0):
         """apps: [(name, value text, fraction)]"""
         for i, line in enumerate(self.lines):
             if i < len(apps):
-                line.set(*apps[i])
+                line.set(*apps[i], now, duration)
             elif line.app is not None:
                 line.clear()
-        self.empty.set_visible(not apps)
+        if self.empty.get_visible() != (not apps):
+            self.empty.set_visible(not apps)
 
 
 class TempTile(Gtk.Box):
@@ -379,28 +433,43 @@ def card_grid(min_per_line, max_per_line):
 # --- page ------------------------------------------------------------------------
 
 class MonitorPage(Gtk.ScrolledWindow):
-    def __init__(self):
+    def __init__(self, app):
         super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.app = app
+        self.interval = monitor.valid_interval(app.prefs["monitor_interval"])
+        self.smooth_wanted = bool(app.prefs["monitor_smooth"])
         self.monitor = monitor.Monitor()
         self.timer = 0
-        self.ticks = 0
+        self.frame_timer = 0
+        self.last_run = {}
         self.sampling = False
         self.last_sample = 0.0
+        self.last_temps = 0.0
         self.ss_busy = False
         self.ss_missing = False
         self.net_apps = []
         self.sensor_rows = {}
         self.numbers = {}
+        self.glides = {}
+        self.mem_text = self.cpu_text = ""
+        self.mem_total = 1
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, css_classes=["monitor-page"],
                       margin_top=18, margin_bottom=18)
         self.set_child(MaxWidth(box, 980))
 
-        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin_start=4)
-        head.append(Gtk.Label(label="System monitor", xalign=0, css_classes=["page-title"]))
-        head.append(Gtk.Label(label=f"Live, updated every {INTERVAL} seconds while this page is open",
-                              xalign=0, wrap=True, css_classes=["dim-label"]))
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        titles.append(Gtk.Label(label="System monitor", xalign=0, css_classes=["page-title"]))
+        self.status = Gtk.Label(xalign=0, wrap=True, max_width_chars=50, css_classes=["dim-label"])
+        titles.append(self.status)
+        head = Gtk.Box(spacing=12, margin_start=4)
+        head.append(titles)
+        self.speed_button = Gtk.MenuButton(valign=Gtk.Align.CENTER, menu_model=self._build_menu(),
+                                           tooltip_text="How often this page updates")
+        self.speed_button.get_popover().set_halign(Gtk.Align.END)      # stay inside the window
+        head.append(self.speed_button)
         box.append(head)
+        self._show_speed()
         self.power = PowerFlow()
         box.append(self.power)
 
@@ -432,16 +501,120 @@ class MonitorPage(Gtk.ScrolledWindow):
         self.sensors_row.add_prefix(Gtk.Image(icon_name="ck-temperature-symbolic"))
         sensors_list.append(self.sensors_row)
         box.append(sensors_list)
+        self._apply_smooth()
+
+    # --- update speed ---
+
+    def _build_menu(self):
+        group = Gio.SimpleActionGroup()
+        speed = Gio.SimpleAction.new_stateful("interval", GLib.VariantType.new("s"),
+                                              GLib.Variant.new_string(f"{self.interval:g}"))
+        speed.connect("change-state", self._on_interval)
+        group.add_action(speed)
+        smooth = Gio.SimpleAction.new_stateful("smooth", None, GLib.Variant.new_boolean(self.smooth_wanted))
+        smooth.connect("change-state", self._on_smooth)
+        group.add_action(smooth)
+        self.insert_action_group("monitor", group)
+        # People who switched animations off for the whole desktop get none here either.
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            settings.connect("notify::gtk-enable-animations", lambda *_: self._apply_smooth())
+        self._apply_smooth()
+
+        speeds = Gio.Menu()
+        for interval in monitor.INTERVALS:
+            speeds.append(f"Every {monitor.interval_text(interval)}", f"monitor.interval::{interval:g}")
+        look = Gio.Menu()
+        look.append("Smooth animation", "monitor.smooth")
+        menu = Gio.Menu()
+        menu.append_section("Update speed", speeds)
+        menu.append_section(None, look)
+        return menu
+
+    def _show_speed(self):
+        text = monitor.interval_text(self.interval)
+        self.speed_button.set_label(f"Every {text}")
+        self.status.set_label(f"Live, updated every {text} while this page is open")
+
+    def _on_interval(self, action, value):
+        interval = monitor.valid_interval(float(value.get_string()))
+        action.set_state(value)
+        if interval == self.interval:
+            return
+        self.interval = interval
+        self.app.set_pref("monitor_interval", interval)
+        self._show_speed()
+        self._apply_smooth()
+        for average in self.numbers.values():
+            average.tau = monitor.number_tau(interval)
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self._start_timer()
+
+    def _on_smooth(self, action, value):
+        action.set_state(value)
+        self.smooth_wanted = value.get_boolean()
+        self.app.set_pref("monitor_smooth", self.smooth_wanted)
+        self._apply_smooth()
+
+    def _apply_smooth(self):
+        settings = Gtk.Settings.get_default()
+        self.smooth = self.smooth_wanted and (settings is None or settings.get_property("gtk-enable-animations"))
+        if hasattr(self, "net"):        # the menu is built before the cards
+            for card in (self.cpu, self.mem, self.disk, self.net):
+                card.spark.delay = self.interval if self.smooth else 0.0
+                card.spark.queue_draw()
+            self._sync_frames()
+
+    def _duration(self, interval=None):
+        return (interval or self.interval) if self.smooth else 0.0
 
     # --- timer ---
 
     def set_active(self, active):
         if active and not self.timer:
             self._tick()
-            self.timer = GLib.timeout_add_seconds(INTERVAL, self._tick)
+            self._start_timer()
         elif not active and self.timer:
             GLib.source_remove(self.timer)
             self.timer = 0
+        self._sync_frames()
+
+    def _start_timer(self):
+        # Whole seconds share a wakeup with the rest of the desktop, which saves power.
+        if float(self.interval).is_integer():
+            self.timer = GLib.timeout_add_seconds(int(self.interval), self._tick)
+        else:
+            self.timer = GLib.timeout_add(int(self.interval * 1000), self._tick)
+
+    def _sync_frames(self):
+        """The animation timer runs only with the sampling, and only in smooth mode."""
+        wanted = bool(self.timer) and self.smooth
+        if wanted and not self.frame_timer:
+            self.frame_timer = GLib.timeout_add(self._frame_ms(), self._frame)
+        elif not wanted and self.frame_timer:
+            GLib.source_remove(self.frame_timer)
+            self.frame_timer = 0
+
+    def _frame_ms(self):
+        native = self.get_native()
+        renderer = native.get_renderer() if native else None
+        return SOFTWARE_FRAME_MS if renderer and renderer.__gtype__.name == "GskCairoRenderer" else FRAME_MS
+
+    def _frame(self):
+        now = time.monotonic()
+        self._render(now)
+        for card in (self.cpu, self.mem, self.disk, self.net):
+            card.animate(now)
+            card.spark.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _due(self, what, now, period):
+        """True once per period; timers run a little early or late, hence the slack."""
+        if now - self.last_run.get(what, -period) < period - 0.1:
+            return False
+        self.last_run[what] = now
+        return True
 
     def _tick(self):
         root = self.get_root()
@@ -449,16 +622,17 @@ class MonitorPage(Gtk.ScrolledWindow):
             return GLib.SOURCE_CONTINUE
         if self.sampling:           # the last reading is still running: never queue them up
             return GLib.SOURCE_CONTINUE
-        self.ticks += 1
-        fresh = time.monotonic() - self.last_sample > MAX_GAP
-        temperatures = fresh or self.ticks % TEMPS_EVERY == 0
+        now = time.monotonic()
+        fresh = now - self.last_sample > max(MAX_GAP, 3 * self.interval)
+        temperatures = self._due("temperatures", now, monitor.temperature_period(self.interval)) or fresh
+        processes = self._due("processes", now, monitor.process_period(self.interval)) or fresh
         self.sampling = True
-        threading.Thread(target=self._sample, args=(fresh, temperatures), daemon=True).start()
-        if self.ticks % NETWORK_EVERY == 1:
+        threading.Thread(target=self._sample, args=(fresh, temperatures, processes), daemon=True).start()
+        if self._due("network", now, monitor.network_period(self.interval)):
             self._run_ss()
         return GLib.SOURCE_CONTINUE
 
-    def _sample(self, fresh, temperatures):
+    def _sample(self, fresh, temperatures, processes):
         """In the worker thread: everything that reads /proc and /sys, nothing that touches GTK."""
         reading = sensors = None
         try:
@@ -468,7 +642,7 @@ class MonitorPage(Gtk.ScrolledWindow):
                 self.monitor.restart()
                 self.monitor.sample()
                 time.sleep(FIRST_READING)
-            reading = self.monitor.sample()
+            reading = self.monitor.sample(processes)
             for apps in (reading["top_cpu"], reading["top_mem"], reading["top_disk"]):
                 for name, _value in apps:
                     app_identity(name)      # the first lookup scans the installed apps
@@ -490,60 +664,80 @@ class MonitorPage(Gtk.ScrolledWindow):
             if reading:
                 self.update_resources(reading, fresh, dt)
             if sensors:
-                self.update_temps(*sensors, dt)
+                self.update_temps(*sensors, now - self.last_temps)
+                self.last_temps = now
         return GLib.SOURCE_REMOVE
 
     # --- resources ---
 
-    def _number(self, key, value, dt, fresh):
-        """A displayed number, averaged over a few seconds so it reads instead of flickering."""
+    def _number(self, key, value, dt, fresh, now):
+        """A displayed number: averaged so it reads instead of flickering, then glided to."""
         if fresh or key not in self.numbers:
-            self.numbers[key] = monitor.Average(NUMBER_TAU)
-        return self.numbers[key].update(value, dt)
+            self.numbers[key] = monitor.Average(monitor.number_tau(self.interval))
+            self.glides[key] = monitor.Glide()
+        self.glides[key].to(self.numbers[key].update(value, dt), now, self._duration())
 
     def update_resources(self, r, fresh, dt):
         fmt = monitor.fmt_bytes
+        now = time.monotonic()
         if fresh:
             for card in (self.cpu, self.mem, self.disk, self.net):
                 if card.spark.a:
                     card.spark.push(None)       # a gap in the line: the page wasn't watching
 
-        cpu = self._number("cpu", r["cpu_pct"], dt, fresh)
-        mhz = r["cpu_mhz"] and self._number("mhz", r["cpu_mhz"], dt, fresh)
-        self.cpu.value.set_label(f"{cpu:.0f}%")
-        self.cpu.subtitle.set_label(f"{r['cpu_count']} threads" + (f" · {mhz / 1000:.1f} GHz" if mhz else ""))
+        self.cpu_text = f"{r['cpu_count']} threads"
+        total = r["mem_total"] or 1
+        self.mem_text = f" of {fmt(total)}" + (f" · swap {fmt(r['swap_used'])}" if r["swap_total"] else "")
+        self.mem_total = total
+        numbers = {"cpu": r["cpu_pct"], "mem": r["mem_used"], "disk_read": r["disk_read"],
+                   "disk_write": r["disk_write"], "net_down": r["net_down"], "net_up": r["net_up"]}
+        if r["cpu_mhz"]:
+            numbers["mhz"] = r["cpu_mhz"]
+        else:
+            self.glides.pop("mhz", None)
+        for key, value in numbers.items():
+            self._number(key, value, dt, fresh, now)
+
         self.cpu.spark.push(r["cpu_pct"])
+        self.mem.spark.push(100 * r["mem_used"] / total)
+        self.disk.spark.push(r["disk_read"], r["disk_write"])
+        self.net.spark.push(r["net_down"], r["net_up"])
+        if r["scanned"]:
+            self._update_apps(r, now)
+        self._render(now)
+
+    def _update_apps(self, r, now):
+        fmt = monitor.fmt_bytes
+        duration = self._duration(monitor.process_period(self.interval))
         # Relative to the whole processor once it's busy; a quiet app on an idle laptop
         # shouldn't fill its bar just because nothing else is running.
-        busy = max(cpu, 25)
-        self.cpu.set_apps([(n, f"{v:.1f}%", v / busy) for n, v in r["top_cpu"]])
+        busy = max(self.glides["cpu"].end, 25)
+        self.cpu.set_apps([(n, f"{v:.1f}%", v / busy) for n, v in r["top_cpu"]], now, duration)
+        self.mem.set_apps([(n, fmt(v), v / self.mem_total) for n, v in r["top_mem"]], now, duration)
+        disk = self.glides["disk_read"].end + self.glides["disk_write"].end
+        top_disk = max([v for _, v in r["top_disk"]] + [disk, 1])
+        self.disk.set_apps([(n, fmt(v, rate=True), v / top_disk) for n, v in r["top_disk"]], now, duration)
+        net = self.glides["net_down"].end + self.glides["net_up"].end
+        top_net = max([v for _, v in self.net_apps] + [net, 1])
+        self.net.set_apps([(n, fmt(v, rate=True), v / top_net) for n, v in self.net_apps], now, duration)
 
-        total = r["mem_total"] or 1
-        self.mem.value.set_label(fmt(r["mem_used"]))
-        swap = f" · swap {fmt(r['swap_used'])}" if r["swap_total"] else ""
-        self.mem.subtitle.set_label(f"{100 * r['mem_used'] / total:.0f}% of {fmt(total)}{swap}")
-        self.mem.spark.push(100 * r["mem_used"] / total)
-        self.mem.set_apps([(n, fmt(v), v / total) for n, v in r["top_mem"]])
-
-        disk_read = self._number("disk_read", r["disk_read"], dt, fresh)
-        disk_write = self._number("disk_write", r["disk_write"], dt, fresh)
-        disk_total = disk_read + disk_write
-        self.disk.value.set_label(fmt(disk_total, rate=True))
-        self.disk.subtitle.set_label("All physical drives")
-        self.disk.spark.push(r["disk_read"], r["disk_write"])
-        self.disk.set_legend(fmt(disk_read, rate=True), fmt(disk_write, rate=True))
-        top_disk = max([v for _, v in r["top_disk"]] + [disk_total, 1])
-        self.disk.set_apps([(n, fmt(v, rate=True), v / top_disk) for n, v in r["top_disk"]])
-
-        net_down = self._number("net_down", r["net_down"], dt, fresh)
-        net_up = self._number("net_up", r["net_up"], dt, fresh)
-        net_total = net_down + net_up
-        self.net.value.set_label(fmt(net_total, rate=True))
-        self.net.subtitle.set_label("Wi-Fi and Ethernet")
-        self.net.spark.push(r["net_down"], r["net_up"])
-        self.net.set_legend(fmt(net_down, rate=True), fmt(net_up, rate=True))
-        top_net = max([v for _, v in self.net_apps] + [net_total, 1])
-        self.net.set_apps([(n, fmt(v, rate=True), v / top_net) for n, v in self.net_apps])
+    def _render(self, now):
+        """Write the numbers as they stand at this moment. Also runs for every animation frame."""
+        if "cpu" not in self.glides:
+            return      # no reading yet
+        fmt = monitor.fmt_bytes
+        value = {key: glide.at(now) for key, glide in self.glides.items()}
+        set_text(self.cpu.value, f"{value['cpu']:.0f}%")
+        mhz = value.get("mhz")
+        set_text(self.cpu.subtitle, self.cpu_text + (f" · {mhz / 1000:.1f} GHz" if mhz else ""))
+        set_text(self.mem.value, fmt(value["mem"]))
+        set_text(self.mem.subtitle, f"{100 * value['mem'] / self.mem_total:.0f}%{self.mem_text}")
+        set_text(self.disk.value, fmt(value["disk_read"] + value["disk_write"], rate=True))
+        set_text(self.disk.subtitle, "All physical drives")
+        self.disk.set_legend(fmt(value["disk_read"], rate=True), fmt(value["disk_write"], rate=True))
+        set_text(self.net.value, fmt(value["net_down"] + value["net_up"], rate=True))
+        set_text(self.net.subtitle, "Wi-Fi and Ethernet")
+        self.net.set_legend(fmt(value["net_down"], rate=True), fmt(value["net_up"], rate=True))
 
     def _run_ss(self):
         if self.ss_busy or self.ss_missing:

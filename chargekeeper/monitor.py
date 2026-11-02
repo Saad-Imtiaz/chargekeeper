@@ -58,6 +58,43 @@ THRESHOLDS = {"cpu": (75, 90), "battery": (40, 50), "board": (65, 80), "storage"
               "gpu": (75, 90), "wifi": (60, 75), "other": (70, 85)}
 
 
+# Update speeds offered on the Monitor page, in seconds.
+INTERVALS = (0.5, 1, 2, 5)
+DEFAULT_INTERVAL = 1
+CHART_WINDOW = 120           # seconds of history the sparklines show
+
+
+def valid_interval(value):
+    """A saved speed, or the default if the preferences file holds anything else."""
+    return value if value in INTERVALS else DEFAULT_INTERVAL
+
+
+def interval_text(interval):
+    """'0.5 s', '1 s', '2 s'."""
+    return f"{interval:g} s"
+
+
+# The totals (/proc/stat, meminfo, diskstats, net/dev) cost 0.2 ms, but a /proc scan for the
+# per-app lists costs 4.5 ms, sensors more (rule 4) and `ss` starts a process. Only the
+# totals follow the fastest speeds: nothing else changes enough for anyone to see it.
+def process_period(interval):
+    return max(interval, 2)
+
+
+def temperature_period(interval):
+    return max(2 * interval, 2)
+
+
+def network_period(interval):
+    return max(interval, 6)
+
+
+def number_tau(interval):
+    """How long the large numbers average over: long enough not to flicker, not so long
+    that a faster speed shows nothing new."""
+    return min(2 * interval, 4)
+
+
 def _read_kv(path):
     out = {}
     for line in (core.read(path) or "").splitlines():
@@ -136,6 +173,41 @@ class Average:
         return self.value
 
 
+class Glide:
+    """A value that moves in a straight line to each new target, for smooth animation."""
+
+    def __init__(self):
+        self.start = self.end = None
+        self.began = self.duration = 0.0
+
+    def to(self, target, now, duration=0.0):
+        self.start = self.at(now) if duration > 0 and self.end is not None else target
+        self.end, self.began, self.duration = target, now, duration
+        return self
+
+    def at(self, now):
+        if self.end is None or self.duration <= 0:
+            return self.end
+        done = (now - self.began) / self.duration
+        return self.end if done >= 1 else self.start + (self.end - self.start) * max(done, 0.0)
+
+
+def chart_lines(times, values, now, width, height, top, window=CHART_WINDOW):
+    """Pixel lines for a sparkline: time runs right to left, `now` is the right edge.
+
+    None in values breaks the line.
+    """
+    lines, current = [], []
+    for t, v in zip(times, values):
+        if v is None:
+            lines.append(current)
+            current = []
+        else:
+            current.append((width * (1 - (now - t) / window), height - 1 - (height - 2) * min(v, top) / top))
+    lines.append(current)
+    return [line for line in lines if len(line) >= 2]
+
+
 class TopTracker:
     """A steady "top apps" list.
 
@@ -195,7 +267,9 @@ class Monitor:
 
     def restart(self):
         """Forget the last reading: after a pause, rates since then would mean nothing."""
-        self.prev = None
+        self.prev = self.prev_scan = None
+        self.tops = {"top_cpu": [], "top_mem": [], "top_disk": []}
+        self.mhz = None
         self.prev_sockets = self.prev_ss_time = None
         self.trackers = {kind: TopTracker(floor) for kind, floor in self.FLOORS.items()}
 
@@ -275,41 +349,19 @@ class Monitor:
             out[pid] = (name, ticks, rss, io, started)
         return out
 
-    def sample(self):
-        """One reading. Rates and percentages need two calls; the first returns zeros."""
-        now = time.monotonic()
-        total, idle, self.ncpu = self._cpu_times()
-        disk = self._disk_bytes()
-        net = self._net_bytes()
+    def _scan_processes(self, now):
+        """The per-app lists. Separate from the totals because it costs 20 times as much."""
         procs = self._processes()
-        mem = _read_kv("/proc/meminfo")
-
-        result = {
-            "cpu_pct": 0.0, "cpu_count": self.ncpu, "cpu_mhz": cpu_freq_mhz(),
-            "mem_total": mem.get("MemTotal", 0) * 1024,
-            "mem_used": (mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) * 1024,
-            "swap_total": mem.get("SwapTotal", 0) * 1024,
-            "swap_used": (mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)) * 1024,
-            "disk_read": 0.0, "disk_write": 0.0, "net_down": 0.0, "net_up": 0.0,
-            "top_cpu": [], "top_mem": [], "top_disk": [],
-        }
-
+        self.mhz = cpu_freq_mhz()
+        dt = max(now - self.prev_scan[0], 0.001) if self.prev_scan else 0.0
         mem_by = {}
         for name, _ticks, rss, _io, _started in procs.values():
             if rss:
                 mem_by[name] = mem_by.get(name, 0) + rss
-        dt = max(now - self.prev[0], 0.001) if self.prev else 0.0
-        result["top_mem"] = self.trackers["mem"].update(mem_by, dt)
+        self.tops["top_mem"] = self.trackers["mem"].update(mem_by, dt)
 
-        if self.prev:
-            _p_now, p_total, p_idle, p_disk, p_net, p_procs = self.prev
-            span = max(total - p_total, 1)
-            result["cpu_pct"] = 100 * (span - (idle - p_idle)) / span
-            result["disk_read"] = max(0, disk[0] - p_disk[0]) / dt
-            result["disk_write"] = max(0, disk[1] - p_disk[1]) / dt
-            result["net_down"] = max(0, net[0] - p_net[0]) / dt
-            result["net_up"] = max(0, net[1] - p_net[1]) / dt
-
+        if self.prev_scan:
+            p_procs = self.prev_scan[1]
             cpu_by, disk_by = {}, {}
             for pid, (name, ticks, _rss, io, started) in procs.items():
                 before = p_procs.get(pid)
@@ -322,12 +374,47 @@ class Monitor:
                     rate = (max(0, io[0] - before[3][0]) + max(0, io[1] - before[3][1])) / dt
                     if rate:
                         disk_by[name] = disk_by.get(name, 0) + rate
-            result["top_cpu"] = self.trackers["cpu"].update(cpu_by, dt)
-            result["top_disk"] = self.trackers["disk"].update(disk_by, dt)
+            self.tops["top_cpu"] = self.trackers["cpu"].update(cpu_by, dt)
+            self.tops["top_disk"] = self.trackers["disk"].update(disk_by, dt)
 
-        self.prev = (now, total, idle, disk, net, procs)
+        self.prev_scan = (now, procs)
         self.pid_names = {pid: p[0] for pid, p in procs.items()}
         self.names.prune({(pid, p[4]) for pid, p in procs.items()})
+
+    def sample(self, processes=True):
+        """One reading. Rates and percentages need two calls; the first returns zeros.
+
+        With processes=False only the system totals are new; the app lists and clock speed
+        are those of the last scan, and "scanned" says which it was.
+        """
+        now = time.monotonic()
+        total, idle, self.ncpu = self._cpu_times()
+        disk = self._disk_bytes()
+        net = self._net_bytes()
+        mem = _read_kv("/proc/meminfo")
+        processes = processes or self.prev_scan is None
+        if processes:
+            self._scan_processes(now)
+
+        result = {
+            "cpu_pct": 0.0, "cpu_count": self.ncpu, "cpu_mhz": self.mhz, "scanned": processes,
+            "mem_total": mem.get("MemTotal", 0) * 1024,
+            "mem_used": (mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) * 1024,
+            "swap_total": mem.get("SwapTotal", 0) * 1024,
+            "swap_used": (mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)) * 1024,
+            "disk_read": 0.0, "disk_write": 0.0, "net_down": 0.0, "net_up": 0.0,
+            **self.tops,
+        }
+        if self.prev:
+            p_now, p_total, p_idle, p_disk, p_net = self.prev
+            dt = max(now - p_now, 0.001)
+            span = max(total - p_total, 1)
+            result["cpu_pct"] = 100 * (span - (idle - p_idle)) / span
+            result["disk_read"] = max(0, disk[0] - p_disk[0]) / dt
+            result["disk_write"] = max(0, disk[1] - p_disk[1]) / dt
+            result["net_down"] = max(0, net[0] - p_net[0]) / dt
+            result["net_up"] = max(0, net[1] - p_net[1]) / dt
+        self.prev = (now, total, idle, disk, net)
         return result
 
     # --- per-app network from `ss -tinpH` output ---

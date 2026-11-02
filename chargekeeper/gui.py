@@ -48,6 +48,8 @@ DEFAULT_PREFS = {
     "low_battery": 15,
     "high_temp": 45,
     "reminder_level": 85,
+    "monitor_interval": 1,
+    "monitor_smooth": True,
 }
 
 BEHAVIOUR_NAMES = {
@@ -526,7 +528,7 @@ class Window(Adw.ApplicationWindow):
     def _on_page(self, *_):
         page = self.stack.get_visible_child_name()
         seen = self.get_visible() and not self.is_suspended()
-        # The monitor samples /proc every 2 s, so it only runs while it's on screen.
+        # The monitor keeps sampling /proc, so it only runs while it's on screen.
         self.monitor_page.set_active(seen and page == "monitor")
         # Only these tabs show live battery numbers; the others have no use for polling.
         if seen and page in ("overview", "monitor"):
@@ -732,7 +734,7 @@ class Window(Adw.ApplicationWindow):
 
     def _build_monitor(self):
         from .monitor_page import MonitorPage
-        self.monitor_page = MonitorPage()
+        self.monitor_page = MonitorPage(self.app)
         self.stack.add_titled_with_icon(self.monitor_page, "monitor", "Monitor",
                                         "utilities-system-monitor-symbolic")
 

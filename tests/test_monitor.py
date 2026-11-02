@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chargekeeper import monitor  # noqa: E402
@@ -228,6 +229,105 @@ class LiveTests(unittest.TestCase):
         self.assertGreater(r["mem_total"], 0)
         self.assertTrue(0 <= r["cpu_pct"] <= 100)
         self.assertLessEqual(len(r["top_mem"]), 3)
+
+
+class UpdateSpeedTests(unittest.TestCase):
+    def test_a_bad_saved_speed_falls_back(self):
+        self.assertEqual(monitor.valid_interval(2), 2)
+        self.assertEqual(monitor.valid_interval(0.001), monitor.DEFAULT_INTERVAL)
+        self.assertEqual(monitor.valid_interval("fast"), monitor.DEFAULT_INTERVAL)
+
+    def test_expensive_readings_do_not_follow_the_fast_speeds(self):
+        self.assertEqual(monitor.process_period(0.5), 2)
+        self.assertEqual(monitor.temperature_period(0.5), 2)
+        self.assertEqual(monitor.network_period(0.5), 6)
+
+    def test_slow_speed_stretches_every_reading(self):
+        self.assertEqual(monitor.process_period(5), 5)
+        self.assertEqual(monitor.temperature_period(5), 10)
+        self.assertEqual(monitor.network_period(5), 6)
+
+    def test_faster_speed_averages_less(self):
+        taus = [monitor.number_tau(i) for i in monitor.INTERVALS]
+        self.assertEqual(taus, sorted(taus))
+        self.assertLessEqual(taus[0], 1)
+
+    def test_totals_alone_do_not_scan_processes(self):
+        m = monitor.Monitor()
+        first = m.sample()
+        self.assertTrue(first["scanned"])
+        scans = []
+        original = m._processes
+        m._processes = lambda: scans.append(1) or original()
+        reading = m.sample(processes=False)
+        self.assertEqual(scans, [])
+        self.assertFalse(reading["scanned"])
+        self.assertEqual(reading["top_mem"], first["top_mem"])      # the last scan's list, not an empty one
+        m.sample()
+        self.assertEqual(scans, [1])
+
+    def test_first_sample_always_scans(self):
+        self.assertTrue(monitor.Monitor().sample(processes=False)["scanned"])
+
+    def test_app_rates_cover_the_time_since_the_last_scan(self):
+        """Rates divided by the time since the last totals would be four times too high at 0.5 s."""
+        m = monitor.Monitor()
+        m._cpu_times = lambda: (0, 0, 1)
+        m._disk_bytes = m._net_bytes = lambda: (0, 0)
+        procs = {1: ("app", 0, 0, None, 5)}
+        m._processes = lambda: dict(procs)
+        with patch.object(monitor.time, "monotonic", side_effect=[100.0, 101.0, 102.0]):
+            m.sample()
+            m.sample(processes=False)
+            procs[1] = ("app", m.hz, 0, None, 5)      # one second of CPU time, over two seconds
+            reading = m.sample()
+        self.assertAlmostEqual(reading["top_cpu"][0][1], 50.0)
+
+
+class GlideTests(unittest.TestCase):
+    def test_moves_in_a_straight_line_and_stops(self):
+        g = monitor.Glide().to(10, 0)
+        g.to(20, 100, 2)
+        self.assertEqual(g.at(100), 10)
+        self.assertEqual(g.at(101), 15)
+        self.assertEqual(g.at(102), 20)
+        self.assertEqual(g.at(500), 20)
+
+    def test_a_new_target_starts_from_where_it_is_now(self):
+        g = monitor.Glide().to(0, 0)
+        g.to(10, 0, 2)
+        g.to(0, 1, 2)       # at 5 when the new reading arrives: no jump
+        self.assertEqual(g.at(1), 5)
+        self.assertEqual(g.at(2), 2.5)
+
+    def test_without_duration_it_jumps(self):
+        g = monitor.Glide().to(1, 0)
+        self.assertEqual(g.to(9, 1).at(1), 9)
+
+    def test_first_value_doesnt_glide_from_nothing(self):
+        g = monitor.Glide()
+        self.assertIsNone(g.at(0))
+        self.assertEqual(g.to(5, 0, 2).at(0), 5)
+
+
+class ChartLinesTests(unittest.TestCase):
+    W, H, TOP = 240, 102, 100
+
+    def lines(self, times, values, now):
+        return monitor.chart_lines(times, values, now, self.W, self.H, self.TOP, window=120)
+
+    def test_time_maps_to_x_with_now_at_the_right_edge(self):
+        [line] = self.lines([0, 60, 120], [0, 50, 100], 120)
+        self.assertEqual([x for x, _y in line], [0, 120, 240])
+        self.assertEqual([y for _x, y in line], [101, 51, 1])
+
+    def test_none_breaks_the_line(self):
+        lines = self.lines([0, 1, 2, 3, 4], [5, 5, None, 5, 5], 4)
+        self.assertEqual(len(lines), 2)
+
+    def test_values_are_capped_at_the_top(self):
+        [line] = self.lines([0, 1], [500, 500], 1)
+        self.assertEqual(line[0][1], 1)
 
 
 if __name__ == "__main__":
