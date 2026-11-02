@@ -155,18 +155,22 @@ def status_line(info, backend, config):
         return "No battery found"
     cap = info["capacity"]
     limit = backend.limit() if backend.available else None
+    # Whole watts: the tooltip and menu only change (and signal the shell) on a real change.
+    power = info.get("power_steady") or info.get("power")
+    watts = f", {power:.0f} W" if power else ""
     if config["calibrating"]:
         return f"{cap}% · Calibrating"
     if info["status"] == "Charging":
         target = 100 if config["top_up"] else (limit or 100)
-        return f"{cap}% · Charging to {target}%"
+        return f"{cap}% · Charging to {target}%" + (f", {power:.0f} W into the battery" if power else "")
     if info["status"] == "Discharging":
         remaining = core.time_remaining(info)
-        return f"{cap}% · On battery" + (f", {fmt_hours(remaining)} left" if remaining else "")
+        state = "Plugged in, running on battery" if info["ac"] else "On battery"
+        return f"{cap}% · {state}{watts}" + (f", {fmt_hours(remaining)} left" if remaining else "")
     if info["ac"] and limit and limit < 100:
         if cap > limit + 2:
             return f"{cap}% · Plugged in, above the {limit}% limit"
-        return f"{cap}% · Plugged in, held at {limit}%"
+        return f"{cap}% · Plugged in, held at {cap}%"
     if info["ac"]:
         return f"{cap}% · Plugged in"
     return f"{cap}% · {info['status']}"

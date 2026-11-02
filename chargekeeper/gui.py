@@ -14,14 +14,29 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, VERSION, core, power, tray  # noqa: E402
-from .cli import fmt_hours, helper_command  # noqa: E402
+from . import APP_ID, VERSION, core, monitor, power, tray  # noqa: E402
+from .cli import fmt_hours, fmt_watts, helper_command  # noqa: E402
 
 GREEN = (0.15, 0.73, 0.42)
 AMBER = (0.90, 0.62, 0.05)
 RED = (0.88, 0.16, 0.18)
 BLUE = (0.21, 0.52, 0.89)
 PURPLE = (0.57, 0.38, 0.85)
+
+# Named colours, one shade each for light and dark backgrounds. Plain hex values because
+# distributions restyle the named palette (Ubuntu's purple is aubergine, which
+# disappears on a dark card). Icons, charts and legends all use these.
+PALETTE = {
+    "cpu": ("#1c71d8", "#62a0ea"), "mem": ("#9141ac", "#c061cb"),
+    "disk": ("#e66100", "#ffa348"), "net": ("#26a269", "#57e389"),
+    "battery": ("#e66100", "#ffa348"), "charger": ("#26a269", "#57e389"),
+}
+
+
+def palette_color(name):
+    """(r, g, b) of a palette colour for the current colour scheme."""
+    value = PALETTE[name][int(Adw.StyleManager.get_default().get_dark())]
+    return tuple(int(value[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
 PREFS_PATH = os.path.join(GLib.get_user_config_dir(), "chargekeeper", "prefs.json")
 AUTOSTART_PATH = os.path.join(GLib.get_user_config_dir(), "autostart", APP_ID + ".desktop")
@@ -45,6 +60,8 @@ PRESETS = (60, 70, 80, 85, 90)
 # the window (config, service state, power settings) changes rarely.
 WINDOW_LIVE_SECONDS = 2
 SLOW_REFRESH_SECONDS = 10
+CHART_SECONDS = 60
+CHART_PAGES = ("overview", "usage", "health")
 RANGES = (("6 hours", 6 * 3600), ("24 hours", 24 * 3600), ("7 days", 7 * 86400))
 USAGE_RANGES = (("Today", 1), ("Last 7 days", 7))
 USAGE_APPS = 8
@@ -111,6 +128,8 @@ class Painter:
             rgba.red, rgba.green, rgba.blue, rgba.alpha = (self.fg.red, self.fg.green, self.fg.blue,
                                                            self.fg.alpha * alpha)
         else:
+            if isinstance(color, str):
+                color = palette_color(color)
             rgba.red, rgba.green, rgba.blue, rgba.alpha = (*color, alpha)
         return rgba
 
@@ -215,10 +234,11 @@ class Chart(Gtk.Widget):
                          accessible_role=Gtk.AccessibleRole.IMG)
         self.set_size_request(200, height)
         self.color, self.unit, self.fixed_max, self.name = color, unit, fixed_max, name
-        self.points, self.t0, self.t1 = [], 0, 1
+        self.series, self.points, self.t0, self.t1 = [], [], 0, 1
         self.reference = None
         self.strip = []
         self.empty_text = "Collecting data…"
+        self.max_gap = None         # seconds between samples before the line breaks; None: by zoom
         self.hover_x = None
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self._on_motion)
@@ -233,12 +253,15 @@ class Chart(Gtk.Widget):
         self.hover_x = None
         self.queue_draw()
 
-    def set_data(self, points, t0, t1, reference=None, strip=None):
-        self.points, self.t0, self.t1 = points, t0, t1
+    def set_data(self, points, t0, t1, reference=None, strip=None, second=None):
+        """points and second (an optional series in its own colour) are [(t, value)]; None breaks a line."""
+        self.series = [(points, self.color)] + ([second] if second else [])
+        self.points = [(t, v, color) for series, color in self.series for t, v in filter(None, series)]
+        self.t0, self.t1 = t0, t1
         self.reference = reference
         self.strip = strip or []
-        if len(points) >= 2:
-            values = [v for _, v in points]
+        if len(self.points) >= 2:
+            values = [v for _, v, _ in self.points]
             summary = (f"{self.name}: now {values[-1]:.0f}{self.unit}, lowest {min(values):.0f}{self.unit}, "
                        f"highest {max(values):.0f}{self.unit}")
         else:
@@ -254,9 +277,10 @@ class Chart(Gtk.Widget):
         return best
 
     def _ymax(self):
+        peak = max((p[1] for p in self.points), default=0)
         if self.fixed_max:
-            return max(self.fixed_max, max((v for _, v in self.points), default=0))
-        peak = max((v for _, v in self.points), default=0)
+            # A reading above the usual top (health over 100%): the next round number.
+            return max(self.fixed_max, math.ceil(peak / 10) * 10)
         step = 5 if peak <= 20 else 10 if peak <= 60 else 25
         return max(step, math.ceil(peak * 1.1 / step) * step)
 
@@ -279,7 +303,7 @@ class Chart(Gtk.Widget):
         for frac in (0, 0.5, 1):
             y = round(top + ph * (1 - frac)) + 0.5
             p.stroke([(left, y), (left + pw, y)], 1, None, 0.10)
-            layout, (tw, th) = p.layout(f"{ymax * frac:.0f}{self.unit}", 8)
+            layout, (tw, th) = p.layout(f"{round(ymax * frac, 1):g}{self.unit}", 8)
             p.text(layout, left - tw - 6, y - th / 2, alpha=0.6)
 
         fmt = "%H:%M" if span <= 86400 else "%a %d"
@@ -300,28 +324,22 @@ class Chart(Gtk.Widget):
             p.text(layout, left + pw / 2 - tw / 2, top + ph / 2 - th / 2, alpha=0.5)
             return
 
-        gap = max(600, span / 80)
-        segments, current, last_t = [], [], None
-        for t, v in self.points:
-            if last_t is not None and t - last_t > gap:
-                segments.append(current)
-                current = []
-            current.append((x_of(t), y_of(v)))
-            last_t = t
-        segments.append(current)
-
-        for seg in segments:
-            if len(seg) < 2:
-                continue
-            p.fill(seg + [(seg[-1][0], top + ph), (seg[0][0], top + ph)], self.color, 0.14)
-            p.stroke(seg, 2, self.color)
+        gap = self.max_gap or max(600, span / 80)
+        for series, color in self.series:
+            for line in core.split_lines(series, gap):
+                seg = [(x_of(t), y_of(v)) for t, v in line]
+                if len(seg) >= 2:
+                    p.fill(seg + [(seg[-1][0], top + ph), (seg[0][0], top + ph)], color, 0.14)
+                    p.stroke(seg, 2, color)
+                else:       # a lone sample still counts: show it as a dot
+                    p.stroke(arc_points(*seg[0], 1.5, 0, 2 * math.pi, 12), 2, color)
 
         if self.hover_x is not None and left <= self.hover_x <= left + pw:
             point = self._nearest(self.t0 + span * (self.hover_x - left) / pw)
             if point and abs(x_of(point[0]) - self.hover_x) < max(12, pw / 40):
                 x, y = x_of(point[0]), y_of(point[1])
                 p.stroke([(x, top), (x, top + ph)], 1, None, 0.35)
-                p.stroke(arc_points(x, y, 3, 0, 2 * math.pi, 16), 2.5, self.color)
+                p.stroke(arc_points(x, y, 3, 0, 2 * math.pi, 16), 2.5, point[2])
                 fmt = "%H:%M" if span <= 86400 else "%a %H:%M"
                 decimals = 1 if self.unit.strip() == "W" else 0
                 label = f"{point[1]:.{decimals}f}{self.unit} · {time.strftime(fmt, time.localtime(point[0]))}"
@@ -329,6 +347,83 @@ class Chart(Gtk.Widget):
                 tx = min(max(x - tw / 2, left), left + pw - tw)
                 p.rect(tx - 4, top, tw + 8, th + 4, None, 0.08)
                 p.text(layout, tx, top + 2)
+
+
+class PowerTile(Gtk.Box):
+    """One power figure: what it is, how much, and how far to trust it."""
+
+    def __init__(self, kind, icon):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                         css_classes=["card", "power-tile", kind], accessible_role=Gtk.AccessibleRole.GROUP)
+        head = Gtk.Box(spacing=6)
+        self.icon = Gtk.Image(icon_name=icon)
+        self.title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["caption-heading"])
+        head.append(self.icon)
+        head.append(self.title)
+        self.value = Gtk.Label(xalign=0, css_classes=["power-value"])
+        self.detail = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, css_classes=["caption", "dim-label"])
+        for widget in (head, self.value, self.detail):
+            self.append(widget)
+        self.active = None
+
+    def set(self, title, value, detail, active):
+        self.title.set_label(title)
+        self.value.set_label(value)
+        self.detail.set_label(detail)
+        if active != self.active:
+            self.active = active
+            (self.add_css_class if active else self.remove_css_class)("active")
+        self.update_property([Gtk.AccessibleProperty.LABEL], [f"{title}: {value}, {detail}"])
+
+
+KIND_WORDS = {"measured": "Measured", "estimate": "Estimated", "at_least": "Not measured",
+              "unknown": "Not measured", "unplugged": "Not plugged in"}
+
+
+class PowerFlow(Gtk.Box):
+    """From the charger, from (or into) the battery, and what the laptop uses."""
+
+    def __init__(self):
+        super().__init__(spacing=10, homogeneous=True)
+        self.charger = PowerTile("charger", "ac-adapter-symbolic")
+        self.battery = PowerTile("battery", "battery-good-symbolic")
+        self.laptop = PowerTile("laptop", "computer-symbolic")
+        for tile in (self.charger, self.battery, self.laptop):
+            self.append(tile)
+
+    def update(self, info, typical):
+        """Show a battery reading; returns the explanation for any figure that isn't measured."""
+        if not info:
+            for tile, title in ((self.charger, "From charger"), (self.battery, "From battery"),
+                                (self.laptop, "Laptop uses")):
+                tile.set(title, "—", "No battery found", False)
+            self.set_tooltip_text(None)
+            return ""
+        flow = core.power_flow(info, typical)
+        self.charger.set("From charger", fmt_watts(flow["from_charger"], flow["charger_kind"]),
+                         KIND_WORDS[flow["charger_kind"]], flow["source"] in ("charger", "both"))
+        if flow["into_battery"] is not None or info["status"] == "Charging":
+            self.battery.remove_css_class("battery")
+            self.battery.add_css_class("charging")
+            self.battery.set("Into battery", fmt_watts(flow["into_battery"]), "Charging", True)
+        else:
+            self.battery.remove_css_class("charging")
+            self.battery.add_css_class("battery")
+            drawing = flow["source"] in ("battery", "both")
+            self.battery.set("From battery", fmt_watts(flow["from_battery"]),
+                             "Measured" if drawing else "Resting", drawing)
+        self.laptop.set("Laptop uses", fmt_watts(flow["laptop"], flow["laptop_kind"]),
+                        KIND_WORDS[flow["laptop_kind"]], False)
+
+        note = ""
+        if flow["charger_kind"] == "estimate":
+            note = (f"This laptop has no sensor for charger power. ≈ figures use your typical draw on "
+                    f"battery ({typical:.0f} W over the last week), so they won't follow a heavy load.")
+        elif flow["charger_kind"] in ("at_least", "unknown"):
+            note = ("This laptop has no sensor for charger power. After about 10 minutes on battery, "
+                    "Chargekeeper can estimate it from your typical draw.")
+        self.set_tooltip_text(note or None)
+        return note
 
 
 # --- small builders --------------------------------------------------------
@@ -378,6 +473,7 @@ class Window(Adw.ApplicationWindow):
         self.history_range = RANGES[1][1]
         self.usage_days = USAGE_RANGES[0][1]
         self.last_chart = 0
+        self.typical = None
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
@@ -396,17 +492,22 @@ class Window(Adw.ApplicationWindow):
 
         bottom = Adw.ViewSwitcherBar(stack=self.stack)
         view.add_bottom_bar(bottom)
-        breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 720sp"))
-        breakpoint.add_setter(bottom, "reveal", True)
-        breakpoint.add_setter(switcher, "visible", False)
-        self.add_breakpoint(breakpoint)
-
         self._build_overview()
         self._build_usage()
         self._build_monitor()
         self._build_charging()
         self._build_health()
         self._build_system()
+        # Only one breakpoint applies at a time, so the narrower one repeats the first's setters.
+        for width, tile_icons in ((720, True), (480, False)):
+            breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse(f"max-width: {width}sp"))
+            breakpoint.add_setter(bottom, "reveal", True)
+            breakpoint.add_setter(switcher, "visible", False)
+            if not tile_icons:      # three tiles side by side: their titles need the room
+                for flow in (self.power_flow, self.monitor_page.power):
+                    for tile in (flow.charger, flow.battery, flow.laptop):
+                        breakpoint.add_setter(tile.icon, "visible", False)
+            self.add_breakpoint(breakpoint)
         view.set_content(self.stack)
         self.toasts.set_child(view)
         self.set_content(self.toasts)
@@ -419,25 +520,40 @@ class Window(Adw.ApplicationWindow):
         self.app.live.subscribe(self._on_battery)
         self.connect("close-request", self._on_close)
         self.connect("notify::visible", self._on_visible)
+        self.connect("notify::suspended", self._on_page)
         self.stack.connect("notify::visible-child-name", self._on_page)
 
     def _on_page(self, *_):
+        page = self.stack.get_visible_child_name()
+        seen = self.get_visible() and not self.is_suspended()
         # The monitor samples /proc every 2 s, so it only runs while it's on screen.
-        self.monitor_page.set_active(self.get_visible() and self.stack.get_visible_child_name() == "monitor")
+        self.monitor_page.set_active(seen and page == "monitor")
+        # Only these tabs show live battery numbers; the others have no use for polling.
+        if seen and page in ("overview", "monitor"):
+            self.app.live.want("window", WINDOW_LIVE_SECONDS)
+            self._show_battery(self.app.live.info)
+        else:
+            self.app.live.release("window")
+        if seen and page in CHART_PAGES and time.time() - self.last_chart > CHART_SECONDS:
+            self.refresh_charts()
 
     def _on_visible(self, *_):
         if self.get_visible():
-            self.app.live.want("window", WINDOW_LIVE_SECONDS)
             self.refresh()
             self.refresh_charts()
-        else:
-            self.app.live.release("window")
         self._on_page()
 
     def _on_battery(self, info):
         """A new live reading: redraw only the battery numbers."""
         if self.get_mapped() and not self.is_suspended():
+            self._show_battery(info)
+
+    def _show_battery(self, info):
+        page = self.stack.get_visible_child_name()
+        if page == "overview":
             self._refresh_overview(info, self.backend, self.config, self.effective)
+        elif page == "monitor":
+            self.monitor_page.power.update(info, self.typical)
 
     def _on_close(self, *_):
         if self.app.prefs["background"]:
@@ -461,7 +577,7 @@ class Window(Adw.ApplicationWindow):
         if self.is_suspended() or not self.get_mapped():
             return GLib.SOURCE_CONTINUE
         self.refresh()
-        if time.time() - self.last_chart > 60:
+        if self.stack.get_visible_child_name() in CHART_PAGES and time.time() - self.last_chart > CHART_SECONDS:
             self.refresh_charts()
         return GLib.SOURCE_CONTINUE
 
@@ -483,13 +599,20 @@ class Window(Adw.ApplicationWindow):
         hero.add(box)
         page.add(hero)
 
+        flow_group = Adw.PreferencesGroup(title="Power")
+        self.power_flow = PowerFlow()
+        flow_group.add(self.power_flow)
+        self.power_note = Gtk.Label(xalign=0, wrap=True, visible=False, margin_top=8, margin_start=2,
+                                    css_classes=["caption", "dim-label"])
+        flow_group.add(self.power_note)
+        page.add(flow_group)
+
         now = Adw.PreferencesGroup(title="Right now")
         self.limit_row = Adw.ActionRow(title="Charge limit", activatable=True)
         self.limit_row.add_prefix(Gtk.Image(icon_name="battery-full-charging-symbolic"))
         self.limit_row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
         self.limit_row.connect("activated", lambda *_: self.stack.set_visible_child_name("charging"))
         now.add(self.limit_row)
-        self.v_power = info_row(now, "Power", "power-profile-balanced-symbolic")
         self.v_time = info_row(now, "Time", "preferences-system-time-symbolic")
         self.v_energy = info_row(now, "Energy", "battery-level-70-symbolic")
         self.v_temp = info_row(now, "Battery temperature", "ck-temperature-symbolic")
@@ -502,12 +625,18 @@ class Window(Adw.ApplicationWindow):
         picker.connect("notify::selected", self._on_range)
         history.set_header_suffix(picker)
         self.chart_level = Chart(GREEN, "%", fixed_max=100, name="Charge level")
-        self.chart_power = Chart(PURPLE, " W", height=120, name="Power draw")
-        for title, chart in (("Charge level", self.chart_level), ("Power draw", self.chart_power)):
+        self.chart_power = Chart("battery", " W", height=120, name="Power")
+        for title, chart, legend in (("Charge level", self.chart_level, ()),
+                                     ("Battery power", self.chart_power,
+                                      (("battery", "Drawn from it"), ("charger", "Charging it")))):
             row = Adw.PreferencesRow(activatable=False)
             inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            inner.append(Gtk.Label(label=title, xalign=0, css_classes=["caption-heading"],
-                                   margin_top=10, margin_start=12))
+            head = Gtk.Box(spacing=6, margin_top=10, margin_start=12, margin_end=12)
+            head.append(Gtk.Label(label=title, xalign=0, hexpand=True, css_classes=["caption-heading"]))
+            for kind, text in legend:
+                head.append(Gtk.Label(label="●", css_classes=["caption", "dot", f"dot-{kind}"]))
+                head.append(Gtk.Label(label=text, css_classes=["caption", "dim-label"], margin_end=6))
+            inner.append(head)
             inner.append(chart)
             row.set_child(inner)
             history.add(row)
@@ -531,7 +660,8 @@ class Window(Adw.ApplicationWindow):
 
         charger = Adw.PreferencesGroup(title="On the charger")
         self.u_plugged = info_row(charger, "Time plugged in", "ac-adapter-symbolic")
-        self.u_charged = info_row(charger, "Charged", "battery-full-charging-symbolic")
+        self.u_charged = info_row(charger, "Battery charged", "battery-full-charging-symbolic")
+        self.u_charged_wh = info_row(charger, "Energy into the battery", "battery-full-charged-symbolic")
         page.add(charger)
 
         self.apps_group = Adw.PreferencesGroup(
@@ -544,6 +674,8 @@ class Window(Adw.ApplicationWindow):
         self.app_rows = []
         for _ in range(USAGE_APPS):
             row = Adw.ActionRow(visible=False)
+            row.icon = Gtk.Image(pixel_size=24)
+            row.add_prefix(row.icon)
             bar = Gtk.LevelBar(valign=Gtk.Align.CENTER, width_request=90, max_value=1)
             label = Gtk.Label(css_classes=["dim-label", "numeric"], width_chars=4, xalign=1)
             row.add_suffix(bar)
@@ -578,6 +710,7 @@ class Window(Adw.ApplicationWindow):
         plugged = summary["plugged_seconds"]
         self.u_plugged.set_label(fmt_duration(plugged) if plugged else "—")
         self.u_charged.set_label(f"{summary['charged_pct']}%" if plugged else "—")
+        self.u_charged_wh.set_label(f"{summary['charged_wh']:.1f} Wh" if plugged else "—")
 
         apps = core.app_usage(self.usage_days)
         total = sum(cpu for _, cpu in apps) or 1
@@ -588,7 +721,9 @@ class Window(Adw.ApplicationWindow):
                 continue
             name, cpu = apps[i]
             share = cpu / total
-            row.set_title(GLib.markup_escape_text(name))
+            display, icon = monitor.app_identity(name)
+            row.set_title(GLib.markup_escape_text(display))
+            row.icon.set_from_gicon(icon)
             row.set_subtitle(f"{fmt_duration(cpu)} of processor time" if cpu >= 60
                              else f"{cpu:.0f} s of processor time")
             bar.set_value(share)
@@ -704,6 +839,7 @@ class Window(Adw.ApplicationWindow):
                                      description="One sample per day, recorded by the background service.")
         self.chart_health = Chart(GREEN, "%", fixed_max=100, height=130, name="Battery health")
         self.chart_health.empty_text = "Needs a few days of data"
+        self.chart_health.max_gap = 14 * 86400      # daily samples: a line through days the laptop was off
         row = Adw.PreferencesRow(activatable=False)
         row.set_child(self.chart_health)
         trend.add(row)
@@ -762,14 +898,14 @@ class Window(Adw.ApplicationWindow):
         self.v_cpu = info_row(power, "CPU", "computer-symbolic")
         page.add(power)
 
-        notify = Adw.PreferencesGroup(title="Notifications")
+        background = Adw.PreferencesGroup(title="Tray")
         prefs = self.app.prefs
         self.bg_row = Adw.SwitchRow(title="Tray icon",
                                     subtitle="Show the battery in the top bar with a quick limit menu. "
                                              "Starts at login and sends notifications.",
                                     active=prefs["background"])
         self.bg_row.connect("notify::active", lambda r, _p: self.app.set_background(r.get_active()))
-        notify.add(self.bg_row)
+        background.add(self.bg_row)
         self.tray_row = Adw.ActionRow(title="The top bar can't show tray icons",
                                       subtitle="GNOME needs the AppIndicator extension for this.",
                                       visible=False)
@@ -777,12 +913,15 @@ class Window(Adw.ApplicationWindow):
         self.tray_button = Gtk.Button(label="Enable", valign=Gtk.Align.CENTER)
         self.tray_button.connect("clicked", self._enable_tray_extension)
         self.tray_row.add_suffix(self.tray_button)
-        notify.add(self.tray_row)
+        background.add(self.tray_row)
+        page.add(background)
+
+        notify = Adw.PreferencesGroup(title="Notifications")
         for key, title, subtitle in (
             ("notify_unplug", "Unplug reminder",
              "When this laptop can't limit charging itself, remind me at the limit"),
             ("notify_limit", "Limit reached", "Tell me when charging pauses at the limit"),
-            ("notify_full", "Top-up finished", "Tell me when a charge to 100% is done"),
+            ("notify_full", "Charge to full finished", "Tell me when a charge to 100% is done"),
         ):
             row = Adw.SwitchRow(title=title, subtitle=subtitle, active=prefs[key])
             row.connect("notify::active", lambda r, _p, k=key: self.app.set_pref(k, r.get_active()))
@@ -839,10 +978,15 @@ class Window(Adw.ApplicationWindow):
             self.ring.update(None, "—", "", BLUE)
             self.status_title.set_label("No battery found")
             self.status_sub.set_label("This computer doesn't report a system battery.")
+            self.status_sub.set_visible(True)
+            self.full_button.set_visible(False)
+            self.limit_row.set_subtitle("—")
+            for label in (self.v_time, self.v_energy, self.v_temp):
+                label.set_label("—")
+            self._show_flow(info)
             return
         cap = info["capacity"]
         status = info["status"]
-        power = info["power"]
         remaining = core.time_remaining(info, 100 if config["top_up"] else limit)
         marker = limit if limit < 100 else None
         if not backend.available and self.app.prefs["notify_unplug"]:
@@ -851,11 +995,11 @@ class Window(Adw.ApplicationWindow):
         if config["calibrating"]:
             title, sub = "Calibrating", "Keep the charger connected until calibration finishes."
         elif status == "Charging":
-            title = "Charging" + (f" · {power:.0f} W" if power else "")
+            title = "Charging"
             target = 100 if config["top_up"] else limit
             sub = f"{fmt_hours(remaining)} until {target}%" if remaining else f"Charging to {target}%"
         elif status == "Discharging":
-            title = "On battery" + (f" · {power:.1f} W" if power else "")
+            title = "Plugged in · running on battery" if info["ac"] else "On battery"
             sub = f"About {fmt_hours(remaining)} left" if remaining else ""
             # Tell people when what they're doing right now would change that noticeably.
             at_load = core.time_remaining(info, power=info.get("power_fast"))
@@ -869,8 +1013,10 @@ class Window(Adw.ApplicationWindow):
             elif limit < 100:
                 title = f"Plugged in · held at {cap}%"
                 sub = "Running on adapter power while the battery rests."
-            else:
+            elif status == "Full" or (cap is not None and cap >= 99):
                 title, sub = "Plugged in · fully charged", ""
+            else:
+                title, sub = "Plugged in · not charging", "Running on adapter power."
         else:
             title, sub = status, ""
         self.ring.update(cap, f"{cap}%" if cap is not None else "—",
@@ -886,8 +1032,10 @@ class Window(Adw.ApplicationWindow):
             self.full_button.set_label("Stop and restore the limit")
             self.full_button.remove_css_class("suggested-action")
         else:
-            self.full_button.set_label("Charge to full")
-            self.full_button.add_css_class("suggested-action")
+            self.full_button.set_label("Charge to full once")
+            # A call to action only when pressing it starts charging right away.
+            (self.full_button.add_css_class if info["ac"] else self.full_button.remove_css_class)(
+                "suggested-action")
         self.full_button.set_tooltip_text(
             f"Charge to 100% once. The {limit}% limit comes back when you unplug."
             if not config["top_up"] else "Go back to the charge limit now")
@@ -903,8 +1051,8 @@ class Window(Adw.ApplicationWindow):
         else:
             self.limit_row.set_subtitle("Off: charges to 100%")
 
-        self.v_power.set_label(f"{power:.1f} W" if power is not None else "—")
-        if remaining is not None:
+        self._show_flow(info)
+        if remaining:
             self.v_time.set_label(fmt_hours(remaining) + (" left" if status == "Discharging" else " to target"))
         else:
             self.v_time.set_label("—")
@@ -914,6 +1062,11 @@ class Window(Adw.ApplicationWindow):
             self.v_energy.set_label("—")
         temp = info["temperature"]
         self.v_temp.set_label(f"{temp:.1f} °C" if temp is not None else "Not reported")
+
+    def _show_flow(self, info):
+        note = self.power_flow.update(info, self.typical)
+        self.power_note.set_label(note)
+        self.power_note.set_visible(bool(note))
 
     def _refresh_charging(self, backend, desc, config, limit):
         self.syncing = True
@@ -1022,6 +1175,8 @@ class Window(Adw.ApplicationWindow):
         if not info or info["health"] is None:
             self.health_ring.update(None, "—", "health", BLUE)
             self.health_note.set_label("The battery doesn't report its capacity.")
+            for label in (self.v_full, self.v_design, self.v_wear):
+                label.set_label("—")
             return
         health = info["health"]
         color = GREEN if health >= 80 else AMBER if health >= 60 else RED
@@ -1086,7 +1241,10 @@ class Window(Adw.ApplicationWindow):
         self.last_chart = time.time()
         now = time.time()
         t0 = now - self.history_range
-        points = core.load_history(t0)
+        week = core.load_history(now - core.TYPICAL_DAYS * 86400)
+        self.typical = core.typical_draw(week)
+        self._show_battery(self.app.live.info)     # the estimate may have just become available
+        points = [p for p in week if p["t"] >= t0]
         step = max(1, len(points) // 600)
         sampled = points[::step]
         strip, run_start, prev = [], None, None
@@ -1102,7 +1260,8 @@ class Window(Adw.ApplicationWindow):
         limit = self.backend.limit() if self.backend and self.backend.available else None
         self.chart_level.set_data([(p["t"], p["capacity"]) for p in sampled if p["capacity"] is not None],
                                   t0, now, reference=limit if limit and limit < 100 else None, strip=strip)
-        self.chart_power.set_data([(p["t"], p["power"]) for p in sampled if p["power"] is not None], t0, now)
+        drawn, charged = core.power_series(sampled)
+        self.chart_power.set_data(drawn, t0, now, second=(charged, "charger"))
 
         health = [r for r in core.load_health() if r["health"] is not None]
         h0 = min(health[0]["t"], now - 30 * 86400) if health else now - 30 * 86400

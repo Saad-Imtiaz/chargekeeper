@@ -38,17 +38,40 @@ class MonitorTests(unittest.TestCase):
             core.combined_info = original
 
     def test_power_derived_from_energy(self):
-        base = {"status": "Discharging", "power": None, "capacity": 50}
+        base = {"status": "Discharging", "power": None, "capacity": 50, "ac": False}
         out = self.run_monitor([dict(base, energy_now=30.0), dict(base, energy_now=29.9),
                                 dict(base, energy_now=29.8)])
         self.assertIsNone(out[0]["power"])
         self.assertAlmostEqual(out[1]["power"], 0.1 * 3600 / 30, places=3)   # 12 W
 
     def test_reported_power_kept(self):
-        base = {"status": "Discharging", "capacity": 50, "energy_now": 30.0}
+        base = {"status": "Discharging", "capacity": 50, "energy_now": 30.0, "ac": False}
         out = self.run_monitor([dict(base, power=9.0), dict(base, power=11.0)])
         self.assertEqual(out[1]["power"], 11.0)
         self.assertTrue(9.0 < out[1]["power_avg"] < 11.0)
+
+    def test_steady_power_follows_load_but_damps_a_spike(self):
+        base = {"status": "Discharging", "capacity": 50, "energy_now": 30.0, "ac": False}
+        monitor = power.BatteryMonitor()
+        original = core.combined_info
+        self.addCleanup(setattr, core, "combined_info", original)
+        readings = iter([20.0] * 5 + [60.0] + [20.0] * 5 + [60.0] * 30)
+        core.combined_info = lambda: dict(base, power=next(readings))
+        out = [monitor.read(now=t * 2) for t in range(41)]
+        self.assertEqual(out[4]["power_steady"], 20.0)
+        self.assertLess(out[5]["power_steady"], 30.0)       # one 2 s spike barely shows
+        self.assertGreater(out[40]["power_steady"], 58.0)   # a real change arrives within a minute
+
+    def test_charger_only_read_with_a_charger(self):
+        base = {"status": "Not charging", "capacity": 80, "energy_now": 30.0, "power": 0.0}
+        original = core.combined_info, core.charger_power
+        self.addCleanup(lambda: (setattr(core, "combined_info", original[0]),
+                                 setattr(core, "charger_power", original[1])))
+        core.charger_power = lambda: 33.0
+        core.combined_info = lambda: dict(base, ac=True)
+        self.assertEqual(power.BatteryMonitor().read(now=0)["charger_power"], 33.0)
+        core.combined_info = lambda: dict(base, ac=False)
+        self.assertIsNone(power.BatteryMonitor().read(now=0)["charger_power"])
 
     def test_changed(self):
         a = {"status": "Charging", "capacity": 50, "ac": True, "energy_now": 30.0, "power": 20.0}
@@ -151,6 +174,8 @@ class DaemonScheduleTests(unittest.TestCase):
                         return relevant
 
         events = FakeEvents()
+        self.addCleanup(events.r.close)
+        self.addCleanup(events.w.close)
         threading.Timer(0.2, lambda: events.w.send(b"ACTION=change\0SUBSYSTEM=usb")).start()
         threading.Timer(0.4, lambda: events.w.send(b"ACTION=change\0SUBSYSTEM=power_supply")).start()
         start = time.monotonic()

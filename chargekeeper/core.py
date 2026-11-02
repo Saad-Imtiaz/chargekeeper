@@ -9,6 +9,7 @@ import csv
 import glob
 import json
 import os
+import statistics
 import time
 
 POWER_SUPPLY = "/sys/class/power_supply"
@@ -142,6 +143,30 @@ def ac_online():
         if online is not None:
             state = bool(state) or online == 1
     return state
+
+
+def charger_power():
+    """Watts the plugged-in charger reports delivering, or None without a sensor.
+
+    Few laptops have one: most adapters only report online/offline. USB-C voltage and
+    current are deliberately not used, because on UCSI they are the negotiated contract,
+    not a measurement.
+    """
+    total = None
+    for path in glob.glob(POWER_SUPPLY + "/*"):
+        props = supply_props(path)
+        if (props.get("scope") == "Device" or props.get("online") != "1"
+                or props.get("type") not in ("Mains", "USB", "USB_C", "USB_PD")):
+            continue
+        micro = _int(props.get("power_now"))
+        if micro is None:
+            for sensor in glob.glob(path + "/hwmon*/power1_input"):
+                micro = read_int(sensor)
+                break
+        watts = None if micro is None else _plausible(micro / 1e6, 0, 300)
+        if watts is not None:
+            total = (total or 0) + watts
+    return total
 
 
 def supply_props(path):
@@ -316,6 +341,64 @@ def time_remaining(info, limit=100, power=None):
         return (max(min(target, knee) - now, 0) / power
                 + max(target - knee, 0) / (power * CHARGE_TAPER))
     return None
+
+
+# Where the power is going. The battery's figure is measured. The charger's usually
+# isn't, so without a sensor it is built from what the laptop typically draws on battery.
+TYPICAL_DAYS = 7
+TYPICAL_MIN_SAMPLES = 10      # minutes on battery before an estimate is worth showing
+
+
+def typical_draw(points):
+    """Median watts on battery from history samples, or None with too little data."""
+    values = [p["power"] for p in points
+              if p["status"] == "Discharging" and not p["ac"] and p["power"] and p["power"] >= 1]
+    return statistics.median(values) if len(values) >= TYPICAL_MIN_SAMPLES else None
+
+
+def power_flow(info, typical=None):
+    """How much power comes from the charger and the battery, and what the laptop uses.
+
+    Every value is in watts or None when unknown. charger_kind and laptop_kind say how
+    far to trust it: "measured", "estimate" (uses `typical`), "at_least" (a lower bound)
+    or "unknown"; charger_kind is "unplugged" without a charger. into_battery is only
+    set while charging. source is what is powering the laptop: "charger", "battery" or
+    "both".
+    """
+    status = info["status"]
+    power = info.get("power_steady")
+    if power is None:
+        power = info.get("power")
+    sensor = info.get("charger_power")
+    flow = {"source": "charger", "from_charger": None, "charger_kind": "unknown", "from_battery": 0.0,
+            "into_battery": None, "laptop": None, "laptop_kind": "unknown"}
+
+    if not info.get("ac"):
+        flow.update(source="battery", from_charger=0.0, charger_kind="unplugged", from_battery=power,
+                    laptop=power, laptop_kind="measured" if power is not None else "unknown")
+    elif status == "Discharging":
+        # Run-on-battery mode, or a charger too weak for the load.
+        flow.update(source="battery", from_battery=power)
+        if sensor is not None:
+            flow.update(from_charger=sensor, charger_kind="measured", laptop_kind="measured",
+                        laptop=sensor + (power or 0), source="both" if sensor >= 1 else "battery")
+        elif power is not None:
+            flow.update(laptop=power, laptop_kind="at_least")
+    elif status == "Charging":
+        flow.update(from_battery=None, into_battery=power)
+        if sensor is not None:
+            flow.update(from_charger=sensor, charger_kind="measured", laptop_kind="measured",
+                        laptop=max(sensor - (power or 0), 0.0))
+        elif typical is not None:
+            flow.update(from_charger=typical + (power or 0), charger_kind="estimate",
+                        laptop=typical, laptop_kind="estimate")
+        elif power is not None:
+            flow.update(from_charger=power, charger_kind="at_least")
+    elif sensor is not None:
+        flow.update(from_charger=sensor, charger_kind="measured", laptop=sensor, laptop_kind="measured")
+    elif typical is not None:
+        flow.update(from_charger=typical, charger_kind="estimate", laptop=typical, laptop_kind="estimate")
+    return flow
 
 
 # --- charge-control backends -----------------------------------------------
@@ -772,19 +855,51 @@ def load_history(since):
     try:
         with open(HISTORY_PATH) as f:
             for row in csv.reader(f):
-                if len(row) < 6 or int(row[0]) < since:
+                # A power cut can leave a broken line; skip it, not everything after it.
+                try:
+                    if len(row) < 6 or int(row[0]) < since:
+                        continue
+                    points.append({
+                        "t": int(row[0]),
+                        "capacity": int(row[1]) if row[1] else None,
+                        "power": float(row[2]) if row[2] else None,
+                        "status": row[3],
+                        "ac": row[4] == "1",
+                        "temperature": float(row[5]) if row[5] else None,
+                    })
+                except ValueError:
                     continue
-                points.append({
-                    "t": int(row[0]),
-                    "capacity": int(row[1]) if row[1] else None,
-                    "power": float(row[2]) if row[2] else None,
-                    "status": row[3],
-                    "ac": row[4] == "1",
-                    "temperature": float(row[5]) if row[5] else None,
-                })
-    except (OSError, ValueError):
+    except OSError:
         pass
     return points
+
+
+def split_lines(series, max_gap):
+    """Split [(t, value)] where a line shouldn't connect: at a None or a gap over max_gap."""
+    lines, current, last = [], [], None
+    for point in series:
+        if point is None or (last is not None and point[0] - last > max_gap):
+            lines.append(current)
+            current, last = [], None
+        if point is not None:
+            current.append(point)
+            last = point[0]
+    lines.append(current)
+    return [line for line in lines if line]
+
+
+def power_series(points):
+    """Split history into (on battery, charging) chart series; None marks a break in a line."""
+    battery, charging = [], []
+    for p in points:
+        on_battery = p["status"] == "Discharging" and p["power"] is not None
+        is_charging = p["status"] == "Charging" and p["power"] is not None
+        for series, active in ((battery, on_battery), (charging, is_charging)):
+            if active:
+                series.append((p["t"], p["power"]))
+            elif series and series[-1] is not None:
+                series.append(None)
+    return battery, charging
 
 
 def load_health():
@@ -792,14 +907,17 @@ def load_health():
     try:
         with open(HEALTH_PATH) as f:
             for row in csv.reader(f):
-                full, design = float(row[1]), float(row[2])
-                rows.append({
-                    "t": time.mktime(time.strptime(row[0], "%Y-%m-%d")),
-                    "full": full,
-                    "health": 100 * full / design if design else None,
-                    "cycles": int(row[3]) if row[3] else None,
-                })
-    except (OSError, ValueError, IndexError):
+                try:
+                    full, design = float(row[1]), float(row[2])
+                    rows.append({
+                        "t": time.mktime(time.strptime(row[0], "%Y-%m-%d")),
+                        "full": full,
+                        "health": 100 * full / design if design else None,
+                        "cycles": int(row[3]) if row[3] else None,
+                    })
+                except (ValueError, IndexError):
+                    continue
+    except OSError:
         pass
     return rows
 
@@ -892,7 +1010,7 @@ def app_usage(days):
 def usage_summary(points, max_gap=180):
     """Time, charge and energy on battery and on the charger from history samples."""
     out = {"battery_seconds": 0, "used_pct": 0, "energy_wh": 0.0,
-           "plugged_seconds": 0, "charged_pct": 0}
+           "plugged_seconds": 0, "charged_pct": 0, "charged_wh": 0.0}
     for a, b in zip(points, points[1:]):
         dt = b["t"] - a["t"]
         if dt <= 0 or dt > max_gap:
@@ -901,6 +1019,8 @@ def usage_summary(points, max_gap=180):
             out["plugged_seconds"] += dt
             if a["capacity"] is not None and b["capacity"] is not None:
                 out["charged_pct"] += max(0, b["capacity"] - a["capacity"])
+            if a["status"] == "Charging" and a["power"] is not None:
+                out["charged_wh"] += a["power"] * dt / 3600
         else:
             out["battery_seconds"] += dt
             if a["power"] is not None:

@@ -29,6 +29,7 @@ from . import core
 NETLINK_KOBJECT_UEVENT = 15
 MIN_INTERVAL = 1.0
 HEARTBEAT = 60.0
+STEADY_SECONDS = 8.0          # for showing watts: readable, but follows a real change
 SMOOTHING_SECONDS = 60.0      # fast average: what the laptop is doing now
 PATTERN_SECONDS = 180.0       # estimate: the recent pattern, without brief spikes
 DERIVE_MIN_SECONDS = 30.0     # shortest window for power from energy change
@@ -116,10 +117,12 @@ class Estimator:
 
 
 class BatteryMonitor:
-    """Stateful readings: adds power_avg (the estimate) and power_fast, fills in missing power."""
+    """Stateful readings: adds power_avg (the estimate), power_fast, power_steady (to display)
+    and charger_power, and fills in missing power."""
 
     def __init__(self, estimator=None):
         self.estimator = estimator or Estimator()
+        self.steady = PowerSmoother(STEADY_SECONDS)
         self.anchor = None          # (time, energy_now, status) for deriving power
 
     def read(self, now=None):
@@ -145,6 +148,9 @@ class BatteryMonitor:
             self.anchor = (now, energy, status) if energy is not None else None
 
         info["power_avg"], info["power_fast"] = self.estimator.update(status, power, now)
+        info["power_steady"] = self.steady.update(status, power, now)
+        # Only worth the extra reads with a charger connected.
+        info["charger_power"] = core.charger_power() if info["ac"] else None
         return info
 
 

@@ -261,10 +261,145 @@ class FullTests(unittest.TestCase):
         self.assertFalse(core.is_full(None))
 
 
+class PowerFlowTests(unittest.TestCase):
+    """What the charger and the battery each supply, and how far to trust it."""
+
+    def flow(self, status, ac, power, typical=None, sensor=None):
+        return core.power_flow({"status": status, "ac": ac, "power": power, "charger_power": sensor}, typical)
+
+    def test_on_battery_is_measured(self):
+        f = self.flow("Discharging", False, 24.5, typical=30)
+        self.assertEqual((f["source"], f["from_battery"], f["from_charger"]), ("battery", 24.5, 0.0))
+        self.assertEqual((f["laptop"], f["laptop_kind"], f["charger_kind"]), (24.5, "measured", "unplugged"))
+
+    def test_charging_without_sensor_estimates_from_typical_draw(self):
+        f = self.flow("Charging", True, 40.0, typical=20.0)
+        self.assertEqual((f["into_battery"], f["from_charger"], f["charger_kind"]), (40.0, 60.0, "estimate"))
+        self.assertEqual((f["laptop"], f["laptop_kind"], f["source"]), (20.0, "estimate", "charger"))
+        self.assertIsNone(f["from_battery"])
+
+    def test_charging_without_any_data_gives_a_lower_bound_only(self):
+        f = self.flow("Charging", True, 40.0)
+        self.assertEqual((f["from_charger"], f["charger_kind"]), (40.0, "at_least"))
+        self.assertEqual((f["laptop"], f["laptop_kind"]), (None, "unknown"))
+
+    def test_held_at_limit_runs_on_the_charger(self):
+        # A held battery can report a small current; it isn't powering anything.
+        f = self.flow("Not charging", True, 0.2, typical=22.0)
+        self.assertEqual((f["from_battery"], f["from_charger"], f["charger_kind"]), (0.0, 22.0, "estimate"))
+        self.assertEqual(self.flow("Full", True, 0.0)["charger_kind"], "unknown")
+
+    def test_a_real_sensor_wins(self):
+        f = self.flow("Charging", True, 40.0, typical=20.0, sensor=65.0)
+        self.assertEqual((f["from_charger"], f["charger_kind"], f["laptop"], f["laptop_kind"]),
+                         (65.0, "measured", 25.0, "measured"))
+        f = self.flow("Not charging", True, 0.0, sensor=18.0)
+        self.assertEqual((f["from_charger"], f["laptop"], f["laptop_kind"]), (18.0, 18.0, "measured"))
+
+    def test_plugged_in_but_draining(self):
+        # Run-on-battery mode, or a charger too weak for the load.
+        f = self.flow("Discharging", True, 30.0)
+        self.assertEqual((f["source"], f["from_battery"], f["from_charger"]), ("battery", 30.0, None))
+        self.assertEqual((f["laptop"], f["laptop_kind"]), (30.0, "at_least"))
+        f = self.flow("Discharging", True, 30.0, sensor=45.0)
+        self.assertEqual((f["source"], f["laptop"], f["laptop_kind"]), ("both", 75.0, "measured"))
+
+    def test_steady_reading_is_preferred(self):
+        f = core.power_flow({"status": "Discharging", "ac": False, "power": 90.0, "power_steady": 25.0})
+        self.assertEqual(f["from_battery"], 25.0)
+
+    def test_typical_draw(self):
+        def point(power, status="Discharging", ac=False):
+            return {"power": power, "status": status, "ac": ac}
+        self.assertIsNone(core.typical_draw([point(20)] * 9))       # too little to go on
+        points = [point(20)] * 9 + [point(90)] * 2                  # a spike doesn't move a median
+        points += [point(60, "Charging", True), point(0.1), point(60, "Discharging", True)]
+        self.assertEqual(core.typical_draw(points), 20)
+
+    def test_power_series_splits_and_breaks_lines(self):
+        def point(t, status, power=10.0):
+            return {"t": t, "status": status, "power": power}
+        battery, charging = core.power_series([
+            point(1, "Discharging"), point(2, "Discharging"), point(3, "Charging"),
+            point(4, "Not charging", 0.0), point(5, "Discharging"), point(6, "Charging", None)])
+        self.assertEqual(battery, [(1, 10.0), (2, 10.0), None, (5, 10.0), None])
+        self.assertEqual(charging, [(3, 10.0), None])
+
+
+class ChartLineTests(unittest.TestCase):
+    def test_gaps_and_breaks_split_a_line(self):
+        series = [(0, 1), (10, 1), None, (20, 1), (100, 1), (105, 1)]
+        self.assertEqual(core.split_lines(series, 50), [[(0, 1), (10, 1)], [(20, 1)], [(100, 1), (105, 1)]])
+        self.assertEqual(core.split_lines([None, None], 50), [])
+
+    def test_daily_health_samples_connect(self):
+        # Samples a day apart: the zoom-based gap on a 30-day chart (9 h) drew nothing at all.
+        days = [(i * 86400, 90) for i in range(3)]
+        self.assertEqual(len(core.split_lines(days, 30 * 86400 / 80)), 3)
+        self.assertEqual(core.split_lines(days, 14 * 86400), [days])
+
+
+class ChargerSensorTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        original = core.POWER_SUPPLY
+        core.POWER_SUPPLY = self.dir.name
+        self.addCleanup(setattr, core, "POWER_SUPPLY", original)
+
+    def supply(self, name, uevent):
+        path = os.path.join(self.dir.name, name)
+        os.makedirs(path)
+        with open(path + "/uevent", "w") as f:
+            f.write("".join(f"POWER_SUPPLY_{k}={v}\n" for k, v in uevent.items()))
+        return path
+
+    def test_adapter_without_a_sensor(self):
+        self.supply("ACAD", {"TYPE": "Mains", "ONLINE": 1})
+        self.assertIsNone(core.charger_power())
+
+    def test_usb_c_contract_values_are_not_a_measurement(self):
+        self.supply("ucsi", {"TYPE": "USB", "ONLINE": 1, "VOLTAGE_NOW": 20000000, "CURRENT_NOW": 3250000})
+        self.assertIsNone(core.charger_power())
+
+    def test_power_now(self):
+        self.supply("ADP1", {"TYPE": "Mains", "ONLINE": 1, "POWER_NOW": 45000000})
+        self.assertEqual(core.charger_power(), 45.0)
+
+    def test_hwmon_power(self):
+        path = self.supply("ADP1", {"TYPE": "Mains", "ONLINE": 1})
+        os.makedirs(path + "/hwmon3")
+        with open(path + "/hwmon3/power1_input", "w") as f:
+            f.write("30000000\n")
+        self.assertEqual(core.charger_power(), 30.0)
+
+    def test_offline_device_and_implausible_are_ignored(self):
+        self.supply("offline", {"TYPE": "Mains", "ONLINE": 0, "POWER_NOW": 45000000})
+        self.supply("mouse", {"TYPE": "USB", "ONLINE": 1, "SCOPE": "Device", "POWER_NOW": 5000000})
+        self.supply("bad", {"TYPE": "Mains", "ONLINE": 1, "POWER_NOW": 900000000})
+        self.assertIsNone(core.charger_power())
+
+
+class HistoryFileTests(unittest.TestCase):
+    def test_a_broken_line_only_loses_that_line(self):
+        with tempfile.TemporaryDirectory() as folder:
+            original = core.HISTORY_PATH, core.HEALTH_PATH
+            core.HISTORY_PATH, core.HEALTH_PATH = folder + "/history.csv", folder + "/health.csv"
+            self.addCleanup(lambda: (setattr(core, "HISTORY_PATH", original[0]),
+                                     setattr(core, "HEALTH_PATH", original[1])))
+            with open(core.HISTORY_PATH, "w") as f:
+                f.write("100,50,10.00,Discharging,0,30.0\n17x,5,garbage,,,\n200,49,10.00,Discharging,0,30.0\n")
+            with open(core.HEALTH_PATH, "w") as f:
+                f.write("2026-01-01,90,100,5\nbroken\n2026-01-02,89,100,6\n")
+            self.assertEqual([p["t"] for p in core.load_history(0)], [100, 200])
+            self.assertEqual([r["cycles"] for r in core.load_health()], [5, 6])
+
+
 class UsageTests(unittest.TestCase):
     def test_summary(self):
         def point(t, cap, power, ac):
-            return {"t": t, "capacity": cap, "power": power, "ac": ac}
+            return {"t": t, "capacity": cap, "power": power, "ac": ac,
+                    "status": "Charging" if ac else "Discharging"}
         points = [point(0, 80, 10, False), point(180, 79, 10, False), point(360, 78, 10, False),
                   point(1000, 78, 30, True), point(1060, 80, 30, True)]   # gap of 640 s skipped
         summary = core.usage_summary(points)
@@ -273,6 +408,7 @@ class UsageTests(unittest.TestCase):
         self.assertAlmostEqual(summary["energy_wh"], 1.0)
         self.assertAlmostEqual(summary["average_w"], 10)
         self.assertEqual((summary["plugged_seconds"], summary["charged_pct"]), (60, 2))
+        self.assertAlmostEqual(summary["charged_wh"], 0.5)
 
     def test_sampler(self):
         with tempfile.TemporaryDirectory() as proc:

@@ -1,8 +1,9 @@
-"""Terminal interface: `chargekeeper status|limit|topup|calibrate`."""
+"""Terminal interface: `chargekeeper status|limit|full|calibrate`."""
 
 import os
 import subprocess
 import sys
+import time
 
 from . import core
 
@@ -24,6 +25,19 @@ def fmt_hours(hours):
     return f"{h} h {m:02d} min" if h else f"{m} min"
 
 
+def fmt_watts(value, kind="measured"):
+    """A power reading with its certainty: 24.6 W, ≈ 24 W (estimate), ≥ 18 W (at least)."""
+    if value is None:
+        return "—"
+    if value == 0:
+        return "0 W"
+    if kind == "estimate":
+        return f"≈ {value:.0f} W"
+    if kind == "at_least":
+        return f"≥ {value:.0f} W"
+    return f"{value:.1f} W"
+
+
 def status():
     info = core.combined_info()
     backend = core.detect()
@@ -34,8 +48,17 @@ def status():
     limit = backend.limit()
     print(f"Battery     {info['name']}  {info['capacity']}%  {info['status']}")
     print(f"Adapter     {'plugged in' if info['ac'] else 'on battery'}")
-    if info["power"] is not None:
-        print(f"Power       {info['power']:.1f} W")
+    typical = core.typical_draw(core.load_history(time.time() - core.TYPICAL_DAYS * 86400))
+    info["charger_power"] = core.charger_power() if info["ac"] else None
+    flow = core.power_flow(info, typical)
+    print(f"Charger     {fmt_watts(flow['from_charger'], flow['charger_kind'])}"
+          + {"estimate": "  (estimate: no charger sensor)", "at_least": "  (no charger sensor)",
+             "unknown": "  (no charger sensor)"}.get(flow["charger_kind"], ""))
+    if flow["into_battery"] is not None:
+        print(f"Battery in  {fmt_watts(flow['into_battery'])}")
+    else:
+        print(f"Battery out {fmt_watts(flow['from_battery'])}")
+    print(f"Laptop uses {fmt_watts(flow['laptop'], flow['laptop_kind'])}")
     remaining = core.time_remaining(info, limit or 100)
     if remaining is not None:
         verb = "to empty" if info["status"] == "Discharging" else "to target"
@@ -53,7 +76,7 @@ def status():
         if config["calibrating"]:
             print("Limit       calibration running")
         elif config["top_up"]:
-            print("Limit       off until unplugged (top-up)")
+            print("Limit       off until unplugged (charge to full)")
         elif limit is not None and limit < 100:
             start = backend.start()
             print(f"Limit       {limit}%" + (f" (resume below {start}%)" if start else ""))
