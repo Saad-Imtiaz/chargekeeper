@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import threading
 import time
 
 import gi
@@ -14,7 +15,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, VERSION, core, monitor, power, tray  # noqa: E402
+from . import APP_ID, VERSION, core, monitor, power, tray, tuning  # noqa: E402
 from .cli import fmt_hours, fmt_watts, helper_command  # noqa: E402
 
 GREEN = (0.15, 0.73, 0.42)
@@ -62,6 +63,7 @@ PRESETS = (60, 70, 80, 85, 90)
 # the window (config, service state, power settings) changes rarely.
 WINDOW_LIVE_SECONDS = 2
 SLOW_REFRESH_SECONDS = 10
+FAN_SECONDS = 2               # fan speeds while the Performance tab is on screen
 CHART_SECONDS = 60
 CHART_PAGES = ("overview", "usage", "health")
 RANGES = (("6 hours", 6 * 3600), ("24 hours", 24 * 3600), ("7 days", 7 * 86400))
@@ -476,6 +478,7 @@ class Window(Adw.ApplicationWindow):
         self.usage_days = USAGE_RANGES[0][1]
         self.last_chart = 0
         self.typical = None
+        self.notice_seen = 0
 
         self.toasts = Adw.ToastOverlay()
         view = Adw.ToolbarView()
@@ -497,9 +500,15 @@ class Window(Adw.ApplicationWindow):
         self._build_overview()
         self._build_usage()
         self._build_monitor()
+        self._build_performance()
         self._build_charging()
         self._build_health()
         self._build_system()
+        # Seven tabs side by side need about 1000sp; below that the header switcher stacks
+        # each tab's icon above its label, and below 720sp the tabs move to the bottom.
+        compact = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 1000sp"))
+        compact.add_setter(switcher, "policy", Adw.ViewSwitcherPolicy.NARROW)
+        self.add_breakpoint(compact)
         # Only one breakpoint applies at a time, so the narrower one repeats the first's setters.
         for width, tile_icons in ((720, True), (480, False)):
             breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse(f"max-width: {width}sp"))
@@ -530,6 +539,7 @@ class Window(Adw.ApplicationWindow):
         seen = self.get_visible() and not self.is_suspended()
         # The monitor keeps sampling /proc, so it only runs while it's on screen.
         self.monitor_page.set_active(seen and page == "monitor")
+        self._fans_live(seen and page == "performance")
         # Only these tabs show live battery numbers; the others have no use for polling.
         if seen and page in ("overview", "monitor"):
             self.app.live.want("window", WINDOW_LIVE_SECONDS)
@@ -566,6 +576,7 @@ class Window(Adw.ApplicationWindow):
             return True
         GLib.source_remove(self.timer)
         self.monitor_page.set_active(False)
+        self._fans_live(False)
         self.app.live.release("window")
         self.app.live.listeners.remove(self._on_battery)
         self.app.window = None
@@ -738,6 +749,189 @@ class Window(Adw.ApplicationWindow):
         self.stack.add_titled_with_icon(self.monitor_page, "monitor", "Monitor",
                                         "utilities-system-monitor-symbolic")
 
+    def _build_performance(self):
+        page = Adw.PreferencesPage()
+        self.stack.add_titled_with_icon(page, "performance", "Performance",
+                                        "power-profile-performance-symbolic")
+        self.fan_list = []
+        self.fan_rows = []
+        self.fan_timer = 0
+        self.fan_reading = False
+        self.parts = None
+
+        self.unlock_group = Adw.PreferencesGroup(visible=False)
+        page.add(self.unlock_group)
+        self.unlock_rows = []
+
+        power = Adw.PreferencesGroup(title="Power")
+        self.max_row = Adw.SwitchRow(title="Maximum performance",
+                                     subtitle="Highest firmware profile, CPU and graphics power")
+        self.max_row.add_prefix(Gtk.Image(icon_name="power-profile-performance-symbolic"))
+        self.max_row.connect("notify::active", self._on_max)
+        self.max_ac_row = Adw.SwitchRow(title="Only while plugged in",
+                                        subtitle="Back to the usual settings on battery, which "
+                                                 "also limits the graphics power")
+        self.max_ac_row.add_prefix(Gtk.Image(icon_name="ac-adapter-symbolic"))
+        self.max_ac_row.connect("notify::active", self._on_max)
+        power.add(self.max_row)
+        power.add(self.max_ac_row)
+        self.ppd_row = Adw.ComboRow(title="Power mode")
+        self.ppd_row.add_prefix(Gtk.Image(icon_name="power-profile-balanced-symbolic"))
+        self.ppd_row.connect("notify::selected", self._on_ppd)
+        self.profile_row = Adw.ComboRow(title="Firmware performance profile",
+                                        subtitle="Fan and power limits set by the laptop firmware")
+        self.profile_row.connect("notify::selected", self._on_profile)
+        self.epp_row = Adw.ComboRow(title="CPU energy preference",
+                                    subtitle="Lasts until reboot or until TLP changes it")
+        self.epp_row.connect("notify::selected", self._on_epp)
+        self.tlp_row = Adw.ActionRow(title="TLP is managing power",
+                                     subtitle="TLP switches CPU and device settings when you plug in "
+                                              "or unplug, and may undo maximum performance.")
+        self.tlp_row.add_prefix(Gtk.Image(icon_name="emblem-system-symbolic"))
+        for row in (self.ppd_row, self.profile_row, self.epp_row, self.tlp_row):
+            power.add(row)
+        self.v_cpu = info_row(power, "CPU", "ck-cpu-symbolic")
+        page.add(power)
+
+        self.fan_group = Adw.PreferencesGroup(title="Fans")
+        self.fan_mode_row = Adw.ComboRow(title="Fan control")
+        self.fan_mode_row.add_prefix(Gtk.Image(icon_name="ck-fan-symbolic"))
+        self.fan_mode_row.connect("notify::selected", self._on_fan_mode)
+        self.fan_speed_row = Adw.SpinRow.new_with_range(tuning.FAN_MIN_PERCENT, 100, 5)
+        self.fan_speed_row.set_title("Fixed speed (%)")
+        self.fan_speed_row.set_subtitle(f"Back to automatic if the processor reaches "
+                                        f"{tuning.FAN_SAFE_TEMP} °C")
+        self.fan_speed_row.connect("notify::value", self._on_fan_speed)
+        self.fan_none_row = Adw.ActionRow(title="No fan control",
+                                          subtitle="Linux has no fan controls for this laptop. The "
+                                                   "firmware runs the fans; maximum performance "
+                                                   "usually speeds them up.")
+        self.fan_none_row.add_prefix(Gtk.Image(icon_name="ck-fan-symbolic"))
+        for row in (self.fan_mode_row, self.fan_speed_row, self.fan_none_row):
+            self.fan_group.add(row)
+        page.add(self.fan_group)
+
+    def _refresh_performance(self, config):
+        self.syncing = True
+        try:
+            self.max_row.set_active(config["performance"] != "off")
+            self.max_ac_row.set_active(config["performance"] != "on")
+            self.max_ac_row.set_sensitive(config["performance"] != "off")
+            self.fan_list = tuning.fans()
+            modes = tuning.fan_modes(self.fan_list)
+            names = {"auto": "Automatic", "max": "Full speed", "fixed": "Fixed speed"}
+            if modes:
+                set_combo(self.fan_mode_row, modes,
+                          config["fan_mode"] if config["fan_mode"] in modes else "auto", names)
+            self.fan_mode_row.set_visible(bool(modes))
+            self.fan_speed_row.set_value(config["fan_percent"])
+            self.fan_speed_row.set_visible(config["fan_mode"] == "fixed" and "fixed" in modes)
+            self.fan_none_row.set_visible(not modes and not self.fan_list)
+        finally:
+            self.syncing = False
+
+        labels = [f["label"] for f in self.fan_list if f["rpm"]]
+        if [r.get_title() for r, _ in self.fan_rows] != labels:
+            for row, _ in self.fan_rows:
+                self.fan_group.remove(row)
+            self.fan_rows = []
+            for label in labels:
+                row = Adw.ActionRow(title=label)
+                value = Gtk.Label(css_classes=["dim-label", "numeric"], width_chars=9,
+                                  xalign=1, label="—")
+                row.add_suffix(value)
+                self.fan_group.add(row)
+                self.fan_rows.append((row, value))
+
+        unlocks = tuning.unlocks()
+        if [u["id"] for u in unlocks] != [r.unlock_id for r in self.unlock_rows]:
+            for row in self.unlock_rows:
+                self.unlock_group.remove(row)
+            self.unlock_rows = []
+            for unlock in unlocks:
+                row = Adw.ActionRow(title=unlock["title"], subtitle=unlock["body"])
+                row.unlock_id = unlock["id"]
+                row.add_prefix(Gtk.Image(icon_name="dialog-information-symbolic"))
+                button = Gtk.Button(label="Turn on", valign=Gtk.Align.CENTER,
+                                    css_classes=["suggested-action"])
+                button.connect("clicked", self._on_unlock, unlock["id"])
+                row.add_suffix(button)
+                self.unlock_group.add(row)
+                self.unlock_rows.append(row)
+        self.unlock_group.set_visible(bool(unlocks))
+
+        if self.parts is None:
+            self.parts = []
+            # systemctl and busctl calls: never on the main loop (rule 6).
+            threading.Thread(target=self._read_parts, daemon=True).start()
+
+    def _read_parts(self):
+        parts = tuning.performance_parts(ppd=self.app.ppd() is not None)
+        GLib.idle_add(self._show_parts, parts)
+
+    def _show_parts(self, parts):
+        self.parts = parts
+        if parts:
+            self.max_row.set_subtitle(", ".join(text for _, text in parts))
+        else:
+            self.max_row.set_subtitle("Nothing on this laptop can be raised from Linux")
+        return GLib.SOURCE_REMOVE
+
+    def _fans_live(self, active):
+        if active and not self.fan_timer:
+            self._fan_tick()
+            self.fan_timer = GLib.timeout_add_seconds(FAN_SECONDS, self._fan_tick)
+        elif not active and self.fan_timer:
+            GLib.source_remove(self.fan_timer)
+            self.fan_timer = 0
+
+    def _fan_tick(self):
+        # Some fan speeds are firmware calls (Acer: WMI), so read them in a short-lived thread.
+        if self.fan_list and not self.fan_reading:
+            self.fan_reading = True
+            fans = list(self.fan_list)
+            threading.Thread(target=lambda: GLib.idle_add(self._show_fans, tuning.fan_speeds(fans)),
+                             daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
+    def _show_fans(self, speeds):
+        self.fan_reading = False
+        rpms = [rpm for label, rpm in speeds if label in {r.get_title() for r, _ in self.fan_rows}]
+        for (_row, value), rpm in zip(self.fan_rows, rpms):
+            text = "—" if rpm is None else f"{rpm} RPM"
+            if value.get_label() != text:
+                value.set_label(text)
+        return GLib.SOURCE_REMOVE
+
+    def _on_max(self, _row, _pspec):
+        if self.syncing:
+            return
+        on = self.max_row.get_active()
+        self.max_ac_row.set_sensitive(on)
+        self._queue(performance=("ac" if self.max_ac_row.get_active() else "on") if on else "off")
+
+    def _on_fan_mode(self, row, _pspec):
+        value = combo_value(row)
+        if not self.syncing and value:
+            self.fan_speed_row.set_visible(value == "fixed")
+            self._queue(**{"fan-mode": value})
+
+    def _on_fan_speed(self, row, _pspec):
+        if not self.syncing:
+            self._queue(**{"fan-percent": int(row.get_value())})
+
+    def _on_unlock(self, button, unlock_id):
+        button.set_sensitive(False)
+
+        def done(ok):
+            button.set_sensitive(True)
+            self.parts = None
+            self.refresh()
+            if ok:
+                self.toast("Driver option turned on" if not tuning.unlocks()
+                           else "Restart the laptop to finish")
+        self.app.run_helper(["unlock", unlock_id], done)
+
     def _build_charging(self):
         page = Adw.PreferencesPage()
         self.stack.add_titled_with_icon(page, "charging", "Charging", "battery-full-charging-symbolic")
@@ -881,25 +1075,6 @@ class Window(Adw.ApplicationWindow):
         page = Adw.PreferencesPage()
         self.stack.add_titled_with_icon(page, "system", "Settings", "emblem-system-symbolic")
 
-        power = Adw.PreferencesGroup(title="Performance")
-        self.ppd_row = Adw.ComboRow(title="Power mode")
-        self.ppd_row.add_prefix(Gtk.Image(icon_name="power-profile-balanced-symbolic"))
-        self.ppd_row.connect("notify::selected", self._on_ppd)
-        self.profile_row = Adw.ComboRow(title="Firmware performance profile",
-                                        subtitle="Fan and power limits set by the laptop firmware")
-        self.profile_row.connect("notify::selected", self._on_profile)
-        self.epp_row = Adw.ComboRow(title="CPU energy preference",
-                                    subtitle="Lasts until reboot or until TLP changes it")
-        self.epp_row.connect("notify::selected", self._on_epp)
-        self.tlp_row = Adw.ActionRow(title="TLP is managing power",
-                                     subtitle="TLP switches CPU and device settings when you plug in "
-                                              "or unplug. Chargekeeper only handles the battery.")
-        self.tlp_row.add_prefix(Gtk.Image(icon_name="emblem-system-symbolic"))
-        for row in (self.ppd_row, self.profile_row, self.epp_row, self.tlp_row):
-            power.add(row)
-        self.v_cpu = info_row(power, "CPU", "computer-symbolic")
-        page.add(power)
-
         background = Adw.PreferencesGroup(title="Tray")
         prefs = self.app.prefs
         self.bg_row = Adw.SwitchRow(title="Tray icon",
@@ -974,6 +1149,12 @@ class Window(Adw.ApplicationWindow):
             self._refresh_charging(backend, desc, config, limit)
         self._refresh_health(info, backend, config)
         self._refresh_system(backend, state)
+        self._refresh_performance(config)
+        notice = (state or {}).get("notice")
+        if notice and notice.get("time", 0) > self.notice_seen:
+            self.notice_seen = notice["time"]
+            if time.time() - notice["time"] < 600:
+                self.toast(notice["text"])
 
     def _refresh_overview(self, info, backend, config, limit):
         if not info:

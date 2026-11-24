@@ -18,6 +18,14 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Performance tab
+- **Added:** a Performance tab with the maximum performance switch, "Only while plugged in", the
+  power mode, firmware profile and CPU energy preference (moved from Settings), fan control
+  (automatic, full speed, fixed speed) with live fan speeds, and a "Turn on" offer for driver
+  options that hide a maker's controls. The header tabs stack icon over label below 1000sp so
+  seven tabs fit.
+- **Why:** owners asked for fan control and full power from the same app that guards the battery.
+
 ### 2026-11-24: Fan control and maximum performance in the service
 - **Added:** `tuning.py`. Fan control through hwmon `pwmN`/`pwmN_enable` with per-driver rules
   (Acer, ThinkPad, ASUS, HP, Dell, generic) and MSI Cooler Boost. Maximum performance: the
