@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """Run the app from this source tree under its own app ID, for testing.
 
-The installed launcher (bin/chargekeeper) prefers /usr/lib/chargekeeper, so it
+The installed launcher (bin/powerkeeper) prefers /usr/lib/powerkeeper, so it
 does not test your changes. This loads the source tree directly, uses a separate
 application ID so it never collides with an installed instance, and does not
 touch your preferences or autostart (set XDG_CONFIG_HOME to a scratch folder).
@@ -23,7 +23,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-from chargekeeper import gui  # noqa: E402  (sets the GTK and libadwaita versions)
+from powerkeeper import gui  # noqa: E402  (sets the GTK and libadwaita versions)
 from gi.repository import Adw, GLib  # noqa: E402
 
 parser = argparse.ArgumentParser()
@@ -33,7 +33,7 @@ parser.add_argument("--pages", help="comma-separated tabs; SIGUSR1 moves to the 
 parser.add_argument("--size", default="900x920")
 parser.add_argument("--light", action="store_true")
 parser.add_argument("--dark", action="store_true")
-parser.add_argument("--app-id", default="dev.chargekeeper.Test")
+parser.add_argument("--app-id", default="dev.powerkeeper.Test")
 args = parser.parse_args()
 pages = (args.pages or args.page).split(",")
 # Never add a test run to the login autostart.

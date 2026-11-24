@@ -75,7 +75,7 @@ levelbar.thin.hot block.filled { background: @error_color; }
 """
 
 CARD_COLORS = {"cpu": "cpu", "memory": "mem", "disk": "disk", "network": "net"}
-TILE_ICONS = {"cpu": "ck-cpu-symbolic", "battery": "battery-good-symbolic", "board": "ck-board-symbolic",
+TILE_ICONS = {"cpu": "pk-cpu-symbolic", "battery": "battery-good-symbolic", "board": "pk-board-symbolic",
               "storage": "drive-harddisk-solidstate-symbolic", "gpu": "video-display-symbolic"}
 
 
@@ -345,7 +345,7 @@ class TempTile(Gtk.Box):
         self.kind = kind
         head = Gtk.Box(spacing=10)
         badge = Gtk.Box(css_classes=["metric-icon"], valign=Gtk.Align.CENTER)
-        badge.append(Gtk.Image(icon_name=TILE_ICONS.get(kind, "ck-temperature-symbolic")))
+        badge.append(Gtk.Image(icon_name=TILE_ICONS.get(kind, "pk-temperature-symbolic")))
         head.append(badge)
         head.append(Gtk.Label(label=title, xalign=0, css_classes=["heading"], hexpand=True))
         self.append(head)
@@ -477,8 +477,8 @@ class MonitorPage(Gtk.ScrolledWindow):
             return monitor.fmt_bytes(top, rate=True)
 
         grid = card_grid(1, 2)
-        self.cpu = MetricCard("cpu", "Processor", "ck-cpu-symbolic", fixed_max=100)
-        self.mem = MetricCard("memory", "Memory", "ck-memory-symbolic", fixed_max=100)
+        self.cpu = MetricCard("cpu", "Processor", "pk-cpu-symbolic", fixed_max=100)
+        self.mem = MetricCard("memory", "Memory", "pk-memory-symbolic", fixed_max=100)
         self.disk = MetricCard("disk", "Disk", "drive-harddisk-symbolic", legend=("Read", "Write"),
                                floor=100 * 1000, scale_text=rate_scale,
                                empty="None of your apps are using the disk",
@@ -498,7 +498,7 @@ class MonitorPage(Gtk.ScrolledWindow):
 
         sensors_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         self.sensors_row = Adw.ExpanderRow(title="All sensors")
-        self.sensors_row.add_prefix(Gtk.Image(icon_name="ck-temperature-symbolic"))
+        self.sensors_row.add_prefix(Gtk.Image(icon_name="pk-temperature-symbolic"))
         sensors_list.append(self.sensors_row)
         box.append(sensors_list)
         self._apply_smooth()

@@ -1,6 +1,6 @@
 # Changelog
 
-Every change to Chargekeeper, newest first. Commit IDs point to the full details (`git show ID`).
+Every change to Powerkeeper (called Chargekeeper until 2026-11-24), newest first. Commit IDs point to the full details (`git show ID`).
 Rules learned from these changes are collected in [MAINTAINING.md](MAINTAINING.md#rules-learned-the-hard-way).
 
 ## How to add an entry
@@ -17,6 +17,16 @@ Add new entries at the top of **Unreleased**, one per commit or related group of
 When releasing, rename **Unreleased** to the version and date (see MAINTAINING.md, "Releasing").
 
 ## Unreleased (since 1.1.0)
+
+### 2026-11-24: Chargekeeper is now Powerkeeper
+- **Changed:** the app, command, service, helper, app ID (`dev.powerkeeper.Powerkeeper`), paths
+  (`/usr/lib/powerkeeper`, `/etc/powerkeeper`, `/var/lib/powerkeeper`, `~/.config/powerkeeper`) and
+  the Python package are renamed. Our icons are `pk-*-symbolic`.
+- **Migration:** installing over Chargekeeper stops and removes its service and files, moves
+  `/etc/chargekeeper` and `/var/lib/chargekeeper` (settings, maker choice, history, health, usage)
+  and our driver options, and removes the old autostart entry. The app reads
+  `~/.config/chargekeeper/prefs.json` until it has its own, and removes the old autostart entry.
+- **Why:** it does more than charging now (maximum performance and fans).
 
 ### 2026-11-24: NVIDIA Dynamic Boost service where the driver package has none
 - **Added:** the installer adds an `nvidia-powerd` service and its D-Bus policy when the binary is

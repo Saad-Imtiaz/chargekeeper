@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from chargekeeper import monitor  # noqa: E402
+from powerkeeper import monitor  # noqa: E402
 
 SS = """0      0      10.0.0.2:46516 1.2.3.4:443 users:(("firefox",pid=10,fd=18))
 \t cubic bytes_sent:5000 bytes_acked:4000 bytes_received:9000 segs_out:7

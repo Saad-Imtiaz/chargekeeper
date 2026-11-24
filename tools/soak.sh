@@ -12,11 +12,11 @@
 set -u
 DURATION=${1:-600}
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK=$(mktemp -d -t chargekeeper-soak.XXXXXX)
+WORK=$(mktemp -d -t powerkeeper-soak.XXXXXX)
 mkdir -p "$WORK/config"
 
 XDG_CONFIG_HOME="$WORK/config" timeout $((DURATION + 60)) python3 -I "$REPO/tools/run_app.py" --tray \
-    --app-id dev.chargekeeper.Soak > "$WORK/tray.log" 2>&1 &
+    --app-id dev.powerkeeper.Soak > "$WORK/tray.log" 2>&1 &
 tray_parent=$!
 timeout $((DURATION + 60)) python3 -I "$REPO/tools/service_as_user.py" "$WORK/service" > "$WORK/service.log" 2>&1 &
 service_parent=$!

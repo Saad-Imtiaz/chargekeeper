@@ -21,12 +21,12 @@ SECONDS = int(sys.argv[1]) if len(sys.argv) > 1 else 60
 REPO = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-from chargekeeper import gui  # noqa: E402
+from powerkeeper import gui  # noqa: E402
 from gi.repository import GLib  # noqa: E402
 
 gui.sync_autostart = lambda enabled: None     # never add a test run to the login autostart
 SETTLE = 3      # seconds for the first reading to arrive
-scratch = tempfile.mkdtemp(prefix="chargekeeper-stability-")
+scratch = tempfile.mkdtemp(prefix="powerkeeper-stability-")
 target = os.path.join(scratch, "burst.bin")
 seen = {"moves": 0, "heights": set(), "list_changes": 0, "y": None, "names": None, "stalls": 0, "worst": 0.0,
         "last": time.monotonic(), "start": None, "cpu": 0.0}
@@ -35,7 +35,7 @@ seen = {"moves": 0, "heights": set(), "list_changes": 0, "y": None, "names": Non
 class App(gui.App):
     def __init__(self):
         super().__init__()
-        self.set_application_id("dev.chargekeeper.Stability")
+        self.set_application_id("dev.powerkeeper.Stability")
         self.prefs["background"] = False
         if len(sys.argv) > 3:
             self.prefs["monitor_interval"] = float(sys.argv[3])
@@ -54,7 +54,7 @@ class App(gui.App):
 
 
 if len(sys.argv) > 5:
-    from chargekeeper import monitor_page  # noqa: E402
+    from powerkeeper import monitor_page  # noqa: E402
     monitor_page.FRAME_MS = monitor_page.SOFTWARE_FRAME_MS = int(sys.argv[5])
 app = App()
 

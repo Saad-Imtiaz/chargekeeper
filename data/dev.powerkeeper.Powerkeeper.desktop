@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Chargekeeper
+Name=Powerkeeper
 GenericName=Battery Manager
 Comment=Limit battery charging and track battery health
-Exec=chargekeeper
-Icon=dev.chargekeeper.Chargekeeper
+Exec=powerkeeper
+Icon=dev.powerkeeper.Powerkeeper
 Terminal=false
 Categories=Settings;HardwareSettings;GTK;
 Keywords=battery;charge;limit;health;power;threshold;

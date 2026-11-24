@@ -39,7 +39,7 @@ def palette_color(name):
     value = PALETTE[name][int(Adw.StyleManager.get_default().get_dark())]
     return tuple(int(value[i:i + 2], 16) / 255 for i in (1, 3, 5))
 
-PREFS_PATH = os.path.join(GLib.get_user_config_dir(), "chargekeeper", "prefs.json")
+PREFS_PATH = os.path.join(GLib.get_user_config_dir(), "powerkeeper", "prefs.json")
 AUTOSTART_PATH = os.path.join(GLib.get_user_config_dir(), "autostart", APP_ID + ".desktop")
 DEFAULT_PREFS = {
     "background": True,
@@ -84,8 +84,10 @@ def fmt_duration(seconds):
 
 def load_prefs():
     prefs = dict(DEFAULT_PREFS)
+    # Chargekeeper's preferences, the first time Powerkeeper (its new name) starts.
+    path = PREFS_PATH if os.path.exists(PREFS_PATH) else PREFS_PATH.replace("/powerkeeper/", "/chargekeeper/")
     try:
-        with open(PREFS_PATH) as f:
+        with open(path) as f:
             prefs.update(json.load(f))
     except (OSError, ValueError):
         pass
@@ -99,11 +101,14 @@ def save_prefs(prefs):
 
 
 def sync_autostart(enabled):
+    old = AUTOSTART_PATH.replace("dev.powerkeeper.Powerkeeper", "dev.chargekeeper.Chargekeeper")
+    if os.path.exists(old):     # Chargekeeper's entry would start a program that's gone
+        os.remove(old)
     if enabled:
         os.makedirs(os.path.dirname(AUTOSTART_PATH), exist_ok=True)
         with open(AUTOSTART_PATH, "w") as f:
-            f.write("[Desktop Entry]\nType=Application\nName=Chargekeeper\n"
-                    "Exec=chargekeeper --background\nIcon=" + APP_ID + "\n"
+            f.write("[Desktop Entry]\nType=Application\nName=Powerkeeper\n"
+                    "Exec=powerkeeper --background\nIcon=" + APP_ID + "\n"
                     "X-GNOME-Autostart-enabled=true\nNoDisplay=true\n")
     elif os.path.exists(AUTOSTART_PATH):
         os.remove(AUTOSTART_PATH)
@@ -425,7 +430,7 @@ class PowerFlow(Gtk.Box):
                     f"battery ({typical:.0f} W over the last week), so they won't follow a heavy load.")
         elif flow["charger_kind"] in ("at_least", "unknown"):
             note = ("This laptop has no sensor for charger power. After about 10 minutes on battery, "
-                    "Chargekeeper can estimate it from your typical draw.")
+                    "Powerkeeper can estimate it from your typical draw.")
         self.set_tooltip_text(note or None)
         return note
 
@@ -464,7 +469,7 @@ def combo_value(row):
 
 class Window(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Chargekeeper", default_width=860, default_height=880,
+        super().__init__(application=app, title="Powerkeeper", default_width=860, default_height=880,
                          width_request=360, height_request=420)
         self.app = app
         self.syncing = False
@@ -487,7 +492,7 @@ class Window(Adw.ApplicationWindow):
         switcher = Adw.ViewSwitcher(stack=self.stack, policy=Adw.ViewSwitcherPolicy.WIDE)
         header.set_title_widget(switcher)
         menu = Gio.Menu()
-        menu.append("About Chargekeeper", "app.about")
+        menu.append("About Powerkeeper", "app.about")
         menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu,
                                        tooltip_text="Main menu"))
@@ -628,7 +633,7 @@ class Window(Adw.ApplicationWindow):
         now.add(self.limit_row)
         self.v_time = info_row(now, "Time", "preferences-system-time-symbolic")
         self.v_energy = info_row(now, "Energy", "battery-level-70-symbolic")
-        self.v_temp = info_row(now, "Battery temperature", "ck-temperature-symbolic")
+        self.v_temp = info_row(now, "Battery temperature", "pk-temperature-symbolic")
         page.add(now)
 
         history = Adw.PreferencesGroup(title="History")
@@ -790,12 +795,12 @@ class Window(Adw.ApplicationWindow):
         self.tlp_row.add_prefix(Gtk.Image(icon_name="emblem-system-symbolic"))
         for row in (self.ppd_row, self.profile_row, self.epp_row, self.tlp_row):
             power.add(row)
-        self.v_cpu = info_row(power, "CPU", "ck-cpu-symbolic")
+        self.v_cpu = info_row(power, "CPU", "pk-cpu-symbolic")
         page.add(power)
 
         self.fan_group = Adw.PreferencesGroup(title="Fans")
         self.fan_mode_row = Adw.ComboRow(title="Fan control")
-        self.fan_mode_row.add_prefix(Gtk.Image(icon_name="ck-fan-symbolic"))
+        self.fan_mode_row.add_prefix(Gtk.Image(icon_name="pk-fan-symbolic"))
         self.fan_mode_row.connect("notify::selected", self._on_fan_mode)
         self.fan_speed_row = Adw.SpinRow.new_with_range(tuning.FAN_MIN_PERCENT, 100, 5)
         self.fan_speed_row.set_title("Fixed speed (%)")
@@ -806,7 +811,7 @@ class Window(Adw.ApplicationWindow):
                                           subtitle="Linux has no fan controls for this laptop. The "
                                                    "firmware runs the fans; maximum performance "
                                                    "usually speeds them up.")
-        self.fan_none_row.add_prefix(Gtk.Image(icon_name="ck-fan-symbolic"))
+        self.fan_none_row.add_prefix(Gtk.Image(icon_name="pk-fan-symbolic"))
         for row in (self.fan_mode_row, self.fan_speed_row, self.fan_none_row):
             self.fan_group.add(row)
         page.add(self.fan_group)
@@ -1286,7 +1291,7 @@ class Window(Adw.ApplicationWindow):
                 # No firmware control: the slider sets the unplug reminder instead.
                 self.limit_group.set_title("Unplug reminder")
                 self.limit_group.set_description(
-                    "This laptop can't stop charging by itself, so Chargekeeper will notify you "
+                    "This laptop can't stop charging by itself, so Powerkeeper will notify you "
                     "to unplug at this level.")
                 self.scale_title.set_label("Remind me at")
                 self.scale_row.set_visible(True)
@@ -1577,7 +1582,7 @@ class Window(Adw.ApplicationWindow):
         info = core.combined_info() or {}
         backend = core.detect()
         lines = [
-            f"Chargekeeper {VERSION}",
+            f"Powerkeeper {VERSION}",
             f"Laptop: {core.dmi('sys_vendor')} {core.dmi('product_name')} ({core.dmi('product_version')})",
             f"BIOS: {core.dmi('bios_version')}",
             f"Kernel: {platform.release()}",
@@ -1701,7 +1706,7 @@ class App(Adw.Application):
 
     def _about(self, *_):
         dialog = Adw.AboutDialog(
-            application_name="Chargekeeper", application_icon=APP_ID, version=VERSION,
+            application_name="Powerkeeper", application_icon=APP_ID, version=VERSION,
             developer_name="Saad Imtiaz", license_type=Gtk.License.GPL_3_0,
             comments="Battery charge limits, health tracking and power tools for Linux laptops.")
         dialog.present(self.window)
@@ -1742,7 +1747,7 @@ class App(Adw.Application):
         if self.window and self.window.get_visible():
             self.window.toast(text)
         else:
-            self._notify("error", "Chargekeeper", text)
+            self._notify("error", "Powerkeeper", text)
 
     # --- power-profiles-daemon ---
 

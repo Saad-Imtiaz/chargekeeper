@@ -1,11 +1,11 @@
 #!/bin/bash
 # Build the release archive for the current VERSION from its git tag, and test it unpacked.
 #
-#   tools/release.sh      writes dist/chargekeeper-VERSION.tar.gz and .sha256
+#   tools/release.sh      writes dist/powerkeeper-VERSION.tar.gz and .sha256
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-version=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' chargekeeper/__init__.py)
+version=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' powerkeeper/__init__.py)
 tag="v$version"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "No tag $tag: git tag $tag" >&2; exit 1; }
 [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)" ] || { echo "$tag is not this commit" >&2; exit 1; }
@@ -14,7 +14,7 @@ git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "No tag $tag: gi
 grep -q "^## $version " CHANGELOG.md || { echo "No \"## $version\" heading in CHANGELOG.md" >&2; exit 1; }
 
 mkdir -p dist
-name="chargekeeper-$version"
+name="powerkeeper-$version"
 git archive --format=tar.gz --prefix="$name/" -o "dist/$name.tar.gz" "$tag"
 (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 

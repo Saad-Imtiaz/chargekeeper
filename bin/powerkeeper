@@ -2,17 +2,17 @@
 import os
 import sys
 
-for base in ("/usr/lib/chargekeeper", os.path.dirname(os.path.dirname(os.path.realpath(__file__)))):
-    if os.path.isdir(os.path.join(base, "chargekeeper")):
+for base in ("/usr/lib/powerkeeper", os.path.dirname(os.path.dirname(os.path.realpath(__file__)))):
+    if os.path.isdir(os.path.join(base, "powerkeeper")):
         sys.path.insert(0, base)
         break
 
-from chargekeeper import cli  # noqa: E402
+from powerkeeper import cli  # noqa: E402
 
 args = sys.argv[1:]
 if (args and args[0] in cli.COMMANDS) or (not args and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
     sys.exit(cli.main(args))
 
-from chargekeeper import gui  # noqa: E402
+from powerkeeper import gui  # noqa: E402
 
 sys.exit(gui.main(sys.argv))

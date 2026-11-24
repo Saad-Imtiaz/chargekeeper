@@ -8,7 +8,7 @@ import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from chargekeeper import core, helper, power  # noqa: E402
+from powerkeeper import core, helper, power  # noqa: E402
 
 
 class SmootherTests(unittest.TestCase):

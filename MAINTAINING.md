@@ -1,4 +1,4 @@
-# Maintaining Chargekeeper
+# Maintaining Powerkeeper
 
 Read this before changing the app. It explains how the app fits together, lists every feature,
 records the mistakes already made (so they aren't made again), and gives the checks to run before
@@ -11,40 +11,40 @@ feature updates the feature list below. A bug whose cause wasn't obvious adds a 
 
 ## Summary
 
-Chargekeeper limits battery charging on Linux laptops and shows battery health, usage and a live
+Powerkeeper limits battery charging on Linux laptops and shows battery health, usage and a live
 system monitor. It's written in Python (GTK 4.14+ / libadwaita 1.5+ through PyGObject), with no
 compiled code and no dependencies beyond what GNOME desktops ship.
 
 ```
- GTK app, tray, CLI (user)  ──pkexec──▶  chargekeeper-helper (root)  ──▶  /sys firmware interfaces
+ GTK app, tray, CLI (user)  ──pkexec──▶  powerkeeper-helper (root)  ──▶  /sys firmware interfaces
           │                                       ▲
           │ reads /sys, /proc, kernel events      │ same program, as a systemd service
           ▼                                       │
-   live readings, monitor          chargekeeper.service: re-applies settings, enforces the
+   live readings, monitor          powerkeeper.service: re-applies settings, enforces the
                                    software limit, logs history and per-app usage
 ```
 
 | File | What it does |
 |---|---|
-| `chargekeeper/tuning.py` | Fans (hwmon pwm with per-driver rules, MSI Cooler Boost), maximum performance (save, apply, restore), driver options that unlock makers' controls |
-| `chargekeeper/core.py` | Battery reading (one `uevent` read per supply), firmware backends and their quirks, config, history and usage logs, the per-app CPU sampler used by the service |
-| `chargekeeper/power.py` | Live readings: kernel uevent listener, power estimator, `LiveBattery` (shared by window, tray, notifications) |
-| `chargekeeper/helper.py` | Root entry point: `set`, `apply`, `release`, `platform-profile`, `epp`, `unlock`, and the `daemon` loop |
-| `chargekeeper/gui.py` | The window (Overview, Usage, Performance, Charging, Health, Settings) and the `App` (tray, notifications) |
-| `chargekeeper/monitor_page.py` | The Monitor tab (cards, sparklines, temperature tiles) |
-| `chargekeeper/monitor.py` | Processor, memory, disk, network and temperature readings; app names and icons |
-| `chargekeeper/tray.py` | Tray icon and menu: StatusNotifierItem + dbusmenu over a raw D-Bus connection |
-| `chargekeeper/cli.py` | `chargekeeper status / limit / full / calibrate / performance / fan / unlock` |
+| `powerkeeper/tuning.py` | Fans (hwmon pwm with per-driver rules, MSI Cooler Boost), maximum performance (save, apply, restore), driver options that unlock makers' controls |
+| `powerkeeper/core.py` | Battery reading (one `uevent` read per supply), firmware backends and their quirks, config, history and usage logs, the per-app CPU sampler used by the service |
+| `powerkeeper/power.py` | Live readings: kernel uevent listener, power estimator, `LiveBattery` (shared by window, tray, notifications) |
+| `powerkeeper/helper.py` | Root entry point: `set`, `apply`, `release`, `platform-profile`, `epp`, `unlock`, and the `daemon` loop |
+| `powerkeeper/gui.py` | The window (Overview, Usage, Performance, Charging, Health, Settings) and the `App` (tray, notifications) |
+| `powerkeeper/monitor_page.py` | The Monitor tab (cards, sparklines, temperature tiles) |
+| `powerkeeper/monitor.py` | Processor, memory, disk, network and temperature readings; app names and icons |
+| `powerkeeper/tray.py` | Tray icon and menu: StatusNotifierItem + dbusmenu over a raw D-Bus connection |
+| `powerkeeper/cli.py` | `powerkeeper status / limit / full / calibrate / performance / fan / unlock` |
 | `data/` | systemd unit, resume hook, polkit policy and rule, desktop file, icons |
 | `install.sh`, `uninstall.sh` | System-wide install and removal |
 | `tests/` | Unit tests (no root, no display needed) |
 | `tools/` | Test tools: run from source, soak test, nested GNOME Shell, screenshots, leak test |
 
-Where things live once installed: `/usr/lib/chargekeeper/` (code), `/etc/chargekeeper/config.json`
-(limit, performance and fan settings), `/var/lib/chargekeeper/` (history, health, usage, values
-saved before maximum performance or fan control), `/etc/modprobe.d/chargekeeper-*.conf` (driver
-options from "Turn on"), `/run/chargekeeper/state.json`
-(service status), `~/.config/chargekeeper/prefs.json` (per-user notification and tray settings).
+Where things live once installed: `/usr/lib/powerkeeper/` (code), `/etc/powerkeeper/config.json`
+(limit, performance and fan settings), `/var/lib/powerkeeper/` (history, health, usage, values
+saved before maximum performance or fan control), `/etc/modprobe.d/powerkeeper-*.conf` (driver
+options from "Turn on"), `/run/powerkeeper/state.json`
+(service status), `~/.config/powerkeeper/prefs.json` (per-user notification and tray settings).
 
 ## Features
 
@@ -62,12 +62,12 @@ Each line names where the code lives. Keep this list complete.
   `ThresholdBackend.__init__`
 - Limits rounded down, never up. `Backend.snap`
 - Charge to full once: ends on unplug or 6 h after full. `helper.cmd_daemon`, Overview button,
-  tray, `chargekeeper full`
+  tray, `powerkeeper full`
 - Pause charging / run on battery while plugged in, with automatic return to normal. `behaviour_override`
 - Charging mode (`charge_types`) where available.
 - Calibration auto-stop: firmware done, unplugged, or 24 h. `calibration_stop_reason`
 - Unplug reminder notification on laptops without charge control.
-- Settings re-applied after boot, resume (`data/chargekeeper-resume`) and charger changes (events).
+- Settings re-applied after boot, resume (`data/powerkeeper-resume`) and charger changes (events).
 
 **Battery information** (`core.py`, `power.py`, `gui.py`)
 - Live level, time remaining, energy, temperature. Event-driven, polled only while the Overview or
@@ -267,7 +267,7 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
 
 ### Testing and tooling
 
-33. **`bin/chargekeeper` runs the installed copy** in `/usr/lib/chargekeeper` when there is one. Test
+33. **`bin/powerkeeper` runs the installed copy** in `/usr/lib/powerkeeper` when there is one. Test
     source changes with `tools/run_app.py`; users need `sudo ./install.sh` to get them.
 34. **Broadway (`GDK_BACKEND=broadway`) breaks libadwaita layout** (no font DPI, so `sp` sizes and
     breakpoints collapse). Never judge layout or take screenshots there; use
@@ -316,17 +316,17 @@ Tray screenshots: start `tools/nested-gnome.sh 300 -- --tray`, wait about 30 s, 
 
 Window screenshots for the README: `tools/nested-gnome.sh 300 -- --pages
 overview,usage,monitor,charging,health,system --size 900x920`, then for each tab `tools/capture.sh
-docs/screenshots/NAME.png` followed by `kill -USR1 $(cat /tmp/chargekeeper-nested/app.pid)`.
+docs/screenshots/NAME.png` followed by `kill -USR1 $(cat /tmp/powerkeeper-nested/app.pid)`.
 
 ## Releasing
 
-The version is `VERSION` in `chargekeeper/__init__.py` (shown in the About dialog and diagnostics
+The version is `VERSION` in `powerkeeper/__init__.py` (shown in the About dialog and diagnostics
 report). To release:
 
 1. Run every check above and refresh the README screenshots if the UI changed.
 2. Move the CHANGELOG's "Unreleased" entries under a new version heading with the date, set `VERSION`,
    add `docs/releases/vX.Y.Z.md` (the text for the GitHub release page), and commit.
 3. Tag it (`git tag vX.Y.Z`) and run `tools/release.sh`. It builds
-   `dist/chargekeeper-X.Y.Z.tar.gz` and its checksum from the tag, and runs the tests and the
+   `dist/powerkeeper-X.Y.Z.tar.gz` and its checksum from the tag, and runs the tests and the
    installer's dry run from the unpacked archive.
 4. Push the branch and tag, and attach both files to a GitHub release with the notes from step 2.

@@ -3,7 +3,7 @@
 
     tools/service_as_user.py WORKDIR
 
-It reads the real battery and the real /etc/chargekeeper/config.json, but its own
+It reads the real battery and the real /etc/powerkeeper/config.json, but its own
 files (history, usage, state) go to WORKDIR, and it never saves the config. As a
 normal user it cannot write firmware settings: if the firmware already matches the
 config nothing is written anyway, otherwise the write fails and is logged.
@@ -15,7 +15,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-from chargekeeper import core, helper  # noqa: E402
+from powerkeeper import core, helper  # noqa: E402
 
 work = os.path.abspath(sys.argv[1])
 os.makedirs(work + "/run", exist_ok=True)

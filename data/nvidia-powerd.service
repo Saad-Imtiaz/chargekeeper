@@ -1,5 +1,5 @@
-# NVIDIA Dynamic Boost, added by Chargekeeper where the driver package has no service.
-# Not enabled at boot: Chargekeeper starts it while maximum performance is on.
+# NVIDIA Dynamic Boost, added by Powerkeeper where the driver package has no service.
+# Not enabled at boot: Powerkeeper starts it while maximum performance is on.
 [Unit]
 Description=NVIDIA Dynamic Boost (nvidia-powerd)
 

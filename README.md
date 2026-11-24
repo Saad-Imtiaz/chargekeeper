@@ -1,7 +1,9 @@
-# Chargekeeper
+# Powerkeeper
 
-Battery charge limits, battery health, usage history and a live system monitor for Linux laptops.
-Chargekeeper stops charging at a level you choose so the battery lasts longer, and shows what is using your battery. It is a GTK 4 / libadwaita app with a tray
+Battery charge limits, maximum performance, fan control, battery health, usage history and a live
+system monitor for Linux laptops. Powerkeeper stops charging at a level you choose so the battery
+lasts longer, unlocks your laptop's full power when you want it, and shows what is using your battery.
+It was called Chargekeeper until version 1.2; installing it over Chargekeeper keeps your settings. It is a GTK 4 / libadwaita app with a tray
 icon, a small background service and a command-line tool.
 
 ![Overview](docs/screenshots/overview.png)
@@ -67,17 +69,27 @@ charge to full once, and see the system monitor with the top apps in each catego
 - Temperatures: CPU, battery, motherboard, SSD and GPU, plus every sensor the laptop has.
 - Also in the tray menu, with the top apps in a submenu for each category.
 
+**Performance and fans**
+- **Maximum performance** in one switch: the highest firmware profile (Acer Turbo, Legion extreme
+  mode, ...), CPU energy preference and turbo boost, MSI shift mode, ASUS power limits and NVIDIA
+  Dynamic Boost, whatever your laptop has. Everything goes back to how it was when you switch it off.
+- **Only while plugged in**: full power on the charger, the usual settings on battery.
+- **Fan control**: automatic, full speed, or a fixed speed, with live fan speeds. A fixed speed goes
+  back to automatic if the processor reaches 90 °C.
+- **Hidden controls switched on**: some makers' controls are in Linux but turned off for many
+  models (Acer Predator Turbo and fans, ThinkPad fan control). Powerkeeper offers to turn them on.
+
 **Everything else**
 - Tray icon with a quick menu; it starts at login if you turn it on.
 - Notifications: unplug reminder, limit reached, charge to full finished, low battery, battery too
   hot.
-- Power mode (power-profiles-daemon), firmware performance profile and CPU energy preference.
+- Power mode (power-profiles-daemon or TLP), firmware performance profile and CPU energy preference.
 - Diagnostics: detects missing drivers and conflicting tools, and copies a report for bug reports.
 - Command-line tool for scripts and terminals.
 
 ## Supported laptops
 
-Chargekeeper uses the charge-control interface the Linux kernel exposes for your laptop. Which one
+Powerkeeper uses the charge-control interface the Linux kernel exposes for your laptop. Which one
 you get depends on the maker and model:
 
 | Laptops | Kernel interface | What you can set |
@@ -97,14 +109,14 @@ is never charged past what you asked for. Known firmware rules are applied autom
 |---|---|
 | Dell | limit 55–100%, resume level 50–95%, limit at least 5% above the resume level |
 | LG gram, Toshiba/Dynabook | only 80% or 100% are accepted, so the limit is 80% |
-| MSI | the resume level is always 10% below the limit; Chargekeeper only sets the limit |
+| MSI | the resume level is always 10% below the limit; Powerkeeper only sets the limit |
 | Lenovo IdeaPad/Legion | conservation mode holds 60–80%, depending on the model |
 | ASUS | the kernel accepts any value, but some models only honour 60%, 80% or 100% |
 
 The reference laptop is an Acer Predator PH315-55. Other makers' firmware rules are checked by tests
 that emulate the kernel, so reports from other laptops are very welcome.
 
-To see what your laptop supports, install Chargekeeper and run `chargekeeper status`, or open the
+To see what your laptop supports, install Powerkeeper and run `powerkeeper status`, or open the
 Charging tab. The first row names the interface it found.
 
 ## Install
@@ -149,7 +161,7 @@ Charging tab. The first row names the interface it found.
    `--microsoft`, `--msi`, `--razer`, `--samsung`, `--sony`, `--system76`, `--toshiba` and `--other`
    work the same way (`./install.sh --help` lists them). The installer tells you what to expect from
    that maker, installs any missing dependencies with apt, dnf, pacman or zypper, copies the app to
-   `/usr/lib/chargekeeper`, and starts the background service. On a first install it sets an 85%
+   `/usr/lib/powerkeeper`, and starts the background service. On a first install it sets an 85%
    limit (rounded down to what your laptop supports, for example 80% on Acer).
 
    **Acer laptops** need an extra driver, so choosing Acer also builds
@@ -159,7 +171,7 @@ Charging tab. The first row names the interface it found.
    for a one-time password and must confirm the key (MOK) on the next reboot. Other distributions
    need their own module-signing setup. Run from a script without a terminal, the installer never
    builds the driver unless you pass `--acer`.
-3. Open **Chargekeeper** from the app menu, or run `chargekeeper`.
+3. Open **Powerkeeper** from the app menu, or run `powerkeeper`.
 
 To update, download the new version and run `sudo ./install.sh` again. Your settings are kept, and
 the menu starts on the maker you chose last time.
@@ -187,6 +199,17 @@ once** in the tray. The limit comes back by itself.
 and the battery slowly settles back to the limit. "Plugged in · above the limit" on the Overview is
 normal.
 
+**Full power for a game or a build.** On the **Performance** tab, switch on **Maximum performance**.
+The line under it lists what it changes on your laptop. Leave **Only while plugged in** on to keep
+the usual settings on battery; most laptops hold the graphics chip at a low limit on battery anyway.
+On an Acer Predator or a ThinkPad you may first see an offer to turn the hidden controls on: press
+**Turn on** (the driver reloads; if it's busy, restart the laptop). From a terminal:
+`powerkeeper performance on`, `off` or `ac`.
+
+**Set the fans.** On the same tab, **Fan control** offers what your laptop supports: **Automatic**
+(the firmware decides), **Full speed**, or **Fixed speed** with a percentage. From a terminal:
+`powerkeeper fan auto`, `max` or a number such as `powerkeeper fan 60`.
+
 **Change how fast the Monitor updates.** The button at the top right of the **Monitor** tab sets the
 update speed (every 0.5, 1, 2 or 5 seconds) and switches **Smooth animation** on or off. With it on,
 numbers, bars and graphs glide from one reading to the next; the graphs run one update behind real
@@ -194,14 +217,14 @@ time to do that. Processor, memory, disk and network totals follow the speed you
 stay at every 2 seconds at most, temperatures likewise, and per-app network at every 6 seconds,
 because they cost more to read and hardly change faster. The Power section follows the battery,
 which firmware refreshes on its own schedule. If you've turned animations off for your whole desktop,
-Chargekeeper doesn't animate either.
+Powerkeeper doesn't animate either.
 
 ![The update speed menu on the Monitor tab](docs/screenshots/monitor-speed.png)
 
 **Command line.**
 
 ```
-$ chargekeeper status
+$ powerkeeper status
 Battery     BAT1  100%  Full
 Adapter     plugged in
 Charger     ≈ 25 W  (estimate: no charger sensor)
@@ -213,26 +236,26 @@ Temperature 23.9 °C
 Control     Acer battery health mode
 Limit       80%
 
-$ chargekeeper limit 85        # set the limit (or: off)
-$ chargekeeper full            # charge to 100% once
-$ chargekeeper calibrate on    # Acer only
+$ powerkeeper limit 85        # set the limit (or: off)
+$ powerkeeper full            # charge to 100% once
+$ powerkeeper calibrate on    # Acer only
 ```
 
-Running `chargekeeper` with no arguments opens the app; in a terminal without a display it prints
+Running `powerkeeper` with no arguments opens the app; in a terminal without a display it prints
 the status.
 
 ## How it works
 
 ```
- You (GTK app, tray, CLI)  ──pkexec──▶  chargekeeper-helper (root)  ──▶  firmware via /sys
+ You (GTK app, tray, CLI)  ──pkexec──▶  powerkeeper-helper (root)  ──▶  firmware via /sys
          │                                         ▲
          │ reads /sys and /proc                    │ same program, run by systemd
          ▼                                         │
-  live readings, monitor              chargekeeper.service: re-applies the limit,
+  live readings, monitor              powerkeeper.service: re-applies the limit,
                                       enforces the software limit, logs history
 ```
 
-- The **app runs as your user** and only reads. Every change goes through `chargekeeper-helper`,
+- The **app runs as your user** and only reads. Every change goes through `powerkeeper-helper`,
   which runs as root through polkit and accepts only checked values: percentages in range and
   choices the firmware itself lists.
 - The **background service** re-applies your settings after boot, resume and charger changes (some
@@ -243,7 +266,7 @@ the status.
 
 The battery reports its own power, so "from battery" and "into battery" are measurements. Chargers
 are different: most laptops only tell Linux whether one is connected, and on USB-C the kernel's
-voltage and current are the negotiated contract, not what's flowing. Chargekeeper shows:
+voltage and current are the negotiated contract, not what's flowing. Powerkeeper shows:
 
 - **A measured figure** when the charger really has a sensor.
 - **≈ (an estimate)** otherwise: your typical draw on battery (the median over the last week) plus
@@ -254,7 +277,7 @@ voltage and current are the negotiated contract, not what's flowing. Chargekeepe
 
 ### Live readings without wasting battery
 
-Measuring the battery shouldn't drain it. Chargekeeper keeps readings current like this:
+Measuring the battery shouldn't drain it. Powerkeeper keeps readings current like this:
 
 1. **Kernel events.** Battery and charger drivers announce changes (charger plugged in or out,
    charging started or stopped, and on most laptops every 1% step). The app and the service listen
@@ -302,14 +325,14 @@ Memory stays flat over time: the 10-minute run, 600 tray-menu openings, 40 windo
 
 ## Safety and precautions
 
-Chargekeeper is designed so that a mistake or a crash leaves your laptop charging normally:
+Powerkeeper is designed so that a mistake or a crash leaves your laptop charging normally:
 
 - **Rounding is always down.** You're never charged above the limit you chose.
 - **"Pause charging" and "Run on battery while plugged in" switch off by themselves** when the battery
   falls to 20% or the charger is unplugged, so a forgotten setting can't run a plugged-in laptop
   flat.
-- **If the service stops or crashes**, it sets charging back to normal on the way out. Uninstalling
-  switches the limit off first.
+- **If the service stops or crashes**, it sets charging back to normal on the way out, gives the fans
+  back to the firmware and undoes maximum performance. Uninstalling switches the limit off first.
 - **Calibration and charge to full end on their own:** calibration when the firmware finishes, on
   unplug, or after 24 hours; charge to full on unplug or 6 hours after reaching 100%.
 - **Only values the firmware accepts are written.** Known firmware rules (Dell, LG, Toshiba, MSI)
@@ -318,13 +341,13 @@ Chargekeeper is designed so that a mistake or a crash leaves your laptop chargin
 - **Administrators at the laptop change settings without a password.** Other users are asked for
   an administrator password (polkit).
 - **Nothing leaves your computer.** No network access, no telemetry. History stays in
-  `/var/lib/chargekeeper`.
+  `/var/lib/powerkeeper`.
 
 Precautions:
 
 - **Use one charge-limit tool at a time.** TLP's `START/STOP_CHARGE_THRESH`, GNOME's **Preserve
   Battery Health** (GNOME 48+), KDE's **Battery charge limit**, and vendor tools all write the same
-  firmware setting and will fight. Chargekeeper warns about TLP; switch the others off yourself.
+  firmware setting and will fight. Powerkeeper warns about TLP; switch the others off yourself.
 - **A limit isn't instant if the battery is already above it.** The laptop stops charging and the
   battery drains to the limit through normal use. It doesn't discharge on purpose while plugged
   in.
@@ -332,13 +355,18 @@ Precautions:
   charger connected, and don't calibrate more than every 2–3 months.
 - **The Acer driver is third-party** (built from source at a pinned version). The installer only
   builds it when you choose Acer.
-- The power mode, firmware profile and CPU energy settings on the Settings tab change performance
-  and fan behaviour, not charging. TLP or power-profiles-daemon may override them.
+- The settings on the Performance tab change performance and fan behaviour, not charging. TLP may
+  change some of them when you plug in or unplug; Powerkeeper's service puts maximum performance
+  back within a minute.
+- **Maximum performance makes the laptop hotter and louder** and uses more power. The firmware's
+  own temperature protection stays in charge; Powerkeeper never raises temperature limits.
+- **A fixed fan speed** has a 20% floor, returns to automatic at 90 °C, and goes back to automatic
+  when the service stops or Powerkeeper is uninstalled.
 
 ## What doesn't work
 
 - **Laptops without a kernel charge-control interface** can't limit charging: most HP models,
-  Microsoft Surface, Razer, Gigabyte, and some budget brands. Chargekeeper detects this and offers
+  Microsoft Surface, Razer, Gigabyte, and some budget brands. Powerkeeper detects this and offers
   an unplug reminder instead. Support depends on the kernel, so a newer kernel may add your model.
 - **Desktop computers** have no battery. The Monitor tab still works.
 - **Per-app disk use** covers only your own apps; Linux keeps other users' and system services'
@@ -359,13 +387,13 @@ Precautions:
 
 | Problem | What to do |
 |---|---|
-| Banner: "Background service is not running" | `sudo systemctl enable --now chargekeeper`, or run `sudo ./install.sh` again. |
+| Banner: "Background service is not running" | `sudo systemctl enable --now powerkeeper`, or run `sudo ./install.sh` again. |
 | "The firmware does not accept 85%" | Your model only takes certain values. Choose 80%. |
 | The limit resets after a reboot | Make sure the service is running (above), and that TLP or another tool isn't setting thresholds. |
 | No tray icon on GNOME | Settings tab → **Enable** next to the warning, or turn on the AppIndicator extension. |
 | Acer: "battery driver not installed" | `sudo ./install.sh --acer`. With Secure Boot, complete the MOK enrollment at the next boot. |
 | Charging stopped at a strange level on MSI | Update; MSI's resume level is now handled correctly. |
-| Anything else | Settings tab → Diagnostics → copy button, and include the report in a bug report. Service log: `journalctl -u chargekeeper`. |
+| Anything else | Settings tab → Diagnostics → copy button, and include the report in a bug report. Service log: `journalctl -u powerkeeper`. |
 
 ## Uninstall
 
@@ -375,19 +403,19 @@ sudo ./uninstall.sh --acer   # also removes the Acer driver
 ```
 
 Uninstalling switches the limit off, so the battery charges to 100% again, and sets charging back
-to normal. Your notification preferences stay in `~/.config/chargekeeper`; delete that folder too if
+to normal. Your notification preferences stay in `~/.config/powerkeeper`; delete that folder too if
 you want.
 
 ## Files
 
 | Path | What |
 |---|---|
-| `/usr/lib/chargekeeper/` | the app and `chargekeeper-helper` |
-| `/etc/chargekeeper/config.json` | limit settings (system-wide) |
-| `/etc/chargekeeper/maker` | the maker chosen in the installer, its default next time |
-| `/var/lib/chargekeeper/` | history, health and app usage logs |
-| `/run/chargekeeper/state.json` | service status, read by the app |
-| `~/.config/chargekeeper/prefs.json` | notification, tray and Monitor preferences (per user) |
+| `/usr/lib/powerkeeper/` | the app and `powerkeeper-helper` |
+| `/etc/powerkeeper/config.json` | limit settings (system-wide) |
+| `/etc/powerkeeper/maker` | the maker chosen in the installer, its default next time |
+| `/var/lib/powerkeeper/` | history, health and app usage logs |
+| `/run/powerkeeper/state.json` | service status, read by the app |
+| `~/.config/powerkeeper/prefs.json` | notification, tray and Monitor preferences (per user) |
 | `/usr/share/polkit-1/` | permission policy and rule |
 
 ## Development

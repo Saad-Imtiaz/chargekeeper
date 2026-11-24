@@ -1,4 +1,4 @@
-# Chargekeeper
+# Powerkeeper
 
 Battery charge-limit and monitoring app for Linux laptops (Python, GTK 4 / libadwaita, root helper
 via polkit, systemd service).
@@ -8,7 +8,7 @@ Before changing anything, read [MAINTAINING.md](MAINTAINING.md): architecture, t
 History is in [CHANGELOG.md](CHANGELOG.md).
 
 - Tests: `python3 -m unittest discover tests` (no root, no display).
-- Run from source: `tools/run_app.py` or `tools/run_app.py --tray`. `bin/chargekeeper` runs the
+- Run from source: `tools/run_app.py` or `tools/run_app.py --tray`. `bin/powerkeeper` runs the
   installed copy instead.
 - Never use Broadway for layout or screenshots; use `tools/nested-gnome.sh`.
 - Power cost is a feature: measure with `tools/soak.sh` before and after changes to timers, polling,

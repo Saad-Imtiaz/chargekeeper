@@ -14,7 +14,7 @@
 #   tools/capture.sh out.png          crop the app window from :9
 #   python3 tools/xwd2png.py ...      whole screen (see capture.sh)
 #   python3 tools/click.py X Y        click inside :9 only (never your real pointer)
-#   export DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/chargekeeper-nested/bus.txt)   talk to its bus
+#   export DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/powerkeeper-nested/bus.txt)   talk to its bus
 #
 # Why not Broadway (GDK_BACKEND=broadway)? It has no font DPI setting, so libadwaita's
 # "sp" sizes and breakpoints collapse: pages render as narrow columns that real
@@ -24,7 +24,7 @@ DURATION=${1:-300}
 shift || true
 [ "${1:-}" = "--" ] && shift
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-WORK=/tmp/chargekeeper-nested
+WORK=/tmp/powerkeeper-nested
 rm -rf "$WORK"; mkdir -p "$WORK"/{config,data,cache,runtime}; chmod 700 "$WORK/runtime"
 # Our symbolic icons, as an install would provide them.
 mkdir -p "$WORK/data/icons/hicolor/symbolic/apps"

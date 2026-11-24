@@ -16,8 +16,8 @@ class InstallerMakerTests(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         self.vendor = os.path.join(self.dir.name, "vendor")
         self.saved = os.path.join(self.dir.name, "saved")
-        self.env = {**os.environ, "CHARGEKEEPER_TEST_VENDOR_FILE": self.vendor,
-                    "CHARGEKEEPER_TEST_SAVED_MAKER": self.saved}
+        self.env = {**os.environ, "POWERKEEPER_TEST_VENDOR_FILE": self.vendor,
+                    "POWERKEEPER_TEST_SAVED_MAKER": self.saved}
         self.set_vendor("Dell Inc.")
 
     def set_vendor(self, text):
