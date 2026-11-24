@@ -18,6 +18,13 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Explain fan speeds without fan control
+- **Fixed:** the Performance tab showed fan speeds with no fan control and no word why. It now says
+  Linux can read the speeds but not set them.
+- **Why:** on the Acer Predator PH315-55, `acer_wmi predator_v4=1` gives the Turbo profile and
+  fan speeds (`fan1_input`, `fan2_input`) but no `pwm` files: the driver only offers fan control
+  on models it lists.
+
 ### 2026-11-24: Chargekeeper is now Powerkeeper
 - **Changed:** the app, command, service, helper, app ID (`dev.powerkeeper.Powerkeeper`), paths
   (`/usr/lib/powerkeeper`, `/etc/powerkeeper`, `/var/lib/powerkeeper`, `~/.config/powerkeeper`) and

@@ -807,10 +807,7 @@ class Window(Adw.ApplicationWindow):
         self.fan_speed_row.set_subtitle(f"Back to automatic if the processor reaches "
                                         f"{tuning.FAN_SAFE_TEMP} °C")
         self.fan_speed_row.connect("notify::value", self._on_fan_speed)
-        self.fan_none_row = Adw.ActionRow(title="No fan control",
-                                          subtitle="Linux has no fan controls for this laptop. The "
-                                                   "firmware runs the fans; maximum performance "
-                                                   "usually speeds them up.")
+        self.fan_none_row = Adw.ActionRow(title="No fan control")
         self.fan_none_row.add_prefix(Gtk.Image(icon_name="pk-fan-symbolic"))
         for row in (self.fan_mode_row, self.fan_speed_row, self.fan_none_row):
             self.fan_group.add(row)
@@ -831,7 +828,11 @@ class Window(Adw.ApplicationWindow):
             self.fan_mode_row.set_visible(bool(modes))
             self.fan_speed_row.set_value(config["fan_percent"])
             self.fan_speed_row.set_visible(config["fan_mode"] == "fixed" and "fixed" in modes)
-            self.fan_none_row.set_visible(not modes and not self.fan_list)
+            self.fan_none_row.set_visible(not modes)
+            self.fan_none_row.set_subtitle(
+                ("Linux can read this laptop's fan speeds but not set them. " if self.fan_list
+                 else "Linux has no fan controls for this laptop. ")
+                + "The firmware runs the fans; maximum performance usually speeds them up.")
         finally:
             self.syncing = False
 
