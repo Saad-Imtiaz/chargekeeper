@@ -28,6 +28,7 @@ compiled code and no dependencies beyond what GNOME desktops ship.
 |---|---|
 | `kernelthrottle/tuning.py` | Fans (hwmon pwm with per-driver rules, MSI Cooler Boost), maximum performance (save, apply, restore), driver options that unlock makers' controls |
 | `kernelthrottle/core.py` | Battery reading (one `uevent` read per supply), firmware backends and their quirks, config, history and usage logs, the per-app CPU sampler used by the service |
+| `kernelthrottle/meter.py` | Measured processor power (RAPL, served by the service on `/run/kernelthrottle/meter.sock`) and graphics card power (NVML, amdgpu) without waking a sleeping card |
 | `kernelthrottle/power.py` | Live readings: kernel uevent listener, power estimator, `LiveBattery` (shared by window, tray, notifications) |
 | `kernelthrottle/helper.py` | Root entry point: `set`, `apply`, `release`, `platform-profile`, `epp`, `unlock`, and the `daemon` loop |
 | `kernelthrottle/gui.py` | The window (Overview, Usage, Performance, Charging, Health, Settings) and the `App` (tray, notifications) |
@@ -72,8 +73,10 @@ Each line names where the code lives. Keep this list complete.
 **Battery information** (`core.py`, `power.py`, `gui.py`)
 - Live level, time remaining, energy, temperature. Event-driven, polled only while the Overview or
   Monitor tab is on screen.
-- Power flow: from charger, from or into battery, laptop use; measured, estimated or lower bound.
-  `core.power_flow`, `core.charger_power`, `core.typical_draw`, `gui.PowerFlow`, tray status, CLI.
+- Power flow: from charger, from or into battery, laptop use, processor and graphics card; only
+  measurements, or a lower bound (≥) built from them, never an estimate. `core.power_flow`,
+  `core.charger_power`, `core.measured_parts`, `meter.py`, `gui.PowerFlow`, tray status, CLI.
+  Processor and graphics are read every 2 s, only while the Overview or Monitor tab is on screen.
 - Time remaining from a 3-minute power average; "at the current load" hint; charging time with the
   slowdown above 80%. `power.Estimator`, `core.time_remaining`
 - Health: capacity versus design, wear, cycles, daily health history chart.
@@ -238,6 +241,14 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
     Dynamic Boost start isn't retried until maximum performance is switched off and on.
 50. **Some makers' controls are in the kernel but switched off.** On the Acer Predator PH315-55,
     Turbo and fan control need `acer_wmi predator_v4=1` (the model isn't on the driver's list).
+51. **Asking a graphics card for its power wakes it and keeps it awake.** Check the PCI
+    `power/runtime_status` first and never query a suspended card. Every NVML call restarts the idle
+    timer (the RTX 3060 sleeps ~24 s after the last one), so polling every 2 s kept an idle card at
+    10–22 W indefinitely; an idle card (0% load) is asked only every 30 s (`meter.IDLE_GPU_SECONDS`).
+    This is also why `nvidia-smi` never shows an idle laptop GPU's real state.
+52. **`Window` is one big class: check a name is free before adding one.** A new `self.parts` and
+    `_show_parts` silently replaced the Performance tab's, and the unit tests (no display) couldn't
+    see it. `grep -n "self.NAME\b\|def NAME"` first, and open every tab in the nested session.
 
 ### Tray (GNOME AppIndicator extension)
 
@@ -258,8 +269,10 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
     plain 3-minute average. `EstimatorAccuracyTests` fails if accuracy regresses. (`47ea86b`)
 38. **Never present what the hardware doesn't measure as a measurement.** Barrel adapters only report
     online/offline, and UCSI's USB-C voltage and current are the negotiated contract. Charger power
-    comes from a real sensor (`power_now`, hwmon `power1_input`) or is labelled ≈ or ≥ on screen.
-    Don't read RAPL for this: it's root-only by design (PLATYPUS) and misses the screen and GPU.
+    comes from a real sensor (`power_now`, hwmon `power1_input`) or is shown as ≥ the measured
+    processor plus graphics power. No estimates from history: a week's typical battery draw shown
+    as "≈ charger power" didn't follow the load and read as made-up numbers. RAPL is root-only by
+    design (PLATYPUS), so only the service reads it and hands out averages of at least 1 s.
 39. **A chart's line-break rule has to fit its sample rate.** The zoom-based gap on the 30-day health
     chart (9 h) was shorter than its daily samples, so the line never drew at all. Pass `max_gap`.
 40. **One bad line must not lose the rest of a log.** A single `ValueError` ended `load_history`, so

@@ -346,33 +346,35 @@ def time_remaining(info, limit=100, power=None):
     return None
 
 
-# Where the power is going. The battery's figure is measured. The charger's usually
-# isn't, so without a sensor it is built from what the laptop typically draws on battery.
-TYPICAL_DAYS = 7
-TYPICAL_MIN_SAMPLES = 10      # minutes on battery before an estimate is worth showing
+# Where the power is going. Only measurements are shown: the battery's own reading, a
+# charger sensor where the laptop has one, and the processor and graphics card's own
+# meters (see meter.py). Without a charger sensor the laptop's total on the charger is not
+# known, so it is shown as "at least" the sum of what is measured, never as a guess.
+
+def measured_parts(parts):
+    """Watts the processor and graphics cards measure together, or None if nothing is."""
+    if not parts:
+        return None
+    values = [parts.get("cpu")] + [g["watts"] for g in parts.get("gpus", ())]
+    values = [v for v in values if v is not None]
+    return round(sum(values), 1) if values and parts.get("cpu") is not None else None
 
 
-def typical_draw(points):
-    """Median watts on battery from history samples, or None with too little data."""
-    values = [p["power"] for p in points
-              if p["status"] == "Discharging" and not p["ac"] and p["power"] and p["power"] >= 1]
-    return statistics.median(values) if len(values) >= TYPICAL_MIN_SAMPLES else None
-
-
-def power_flow(info, typical=None):
+def power_flow(info, parts=None):
     """How much power comes from the charger and the battery, and what the laptop uses.
 
     Every value is in watts or None when unknown. charger_kind and laptop_kind say how
-    far to trust it: "measured", "estimate" (uses `typical`), "at_least" (a lower bound)
-    or "unknown"; charger_kind is "unplugged" without a charger. into_battery is only
-    set while charging. source is what is powering the laptop: "charger", "battery" or
-    "both".
+    far to trust it: "measured", "at_least" (a lower bound from measured parts) or
+    "unknown"; charger_kind is "unplugged" without a charger. into_battery is only set
+    while charging. source is what is powering the laptop: "charger", "battery" or
+    "both". parts is {"cpu": watts, "gpus": [...]} from meter.py.
     """
     status = info["status"]
     power = info.get("power_steady")
     if power is None:
         power = info.get("power")
     sensor = info.get("charger_power")
+    inside = measured_parts(parts)
     flow = {"source": "charger", "from_charger": None, "charger_kind": "unknown", "from_battery": 0.0,
             "into_battery": None, "laptop": None, "laptop_kind": "unknown"}
 
@@ -385,22 +387,23 @@ def power_flow(info, typical=None):
         if sensor is not None:
             flow.update(from_charger=sensor, charger_kind="measured", laptop_kind="measured",
                         laptop=sensor + (power or 0), source="both" if sensor >= 1 else "battery")
-        elif power is not None:
-            flow.update(laptop=power, laptop_kind="at_least")
+        else:
+            floor = max(v for v in (power, inside, 0.0) if v is not None)
+            flow.update(laptop=floor or None, laptop_kind="at_least" if floor else "unknown")
     elif status == "Charging":
         flow.update(from_battery=None, into_battery=power)
         if sensor is not None:
             flow.update(from_charger=sensor, charger_kind="measured", laptop_kind="measured",
                         laptop=max(sensor - (power or 0), 0.0))
-        elif typical is not None:
-            flow.update(from_charger=typical + (power or 0), charger_kind="estimate",
-                        laptop=typical, laptop_kind="estimate")
+        elif inside is not None:
+            flow.update(from_charger=round(inside + (power or 0), 1), charger_kind="at_least",
+                        laptop=inside, laptop_kind="at_least")
         elif power is not None:
             flow.update(from_charger=power, charger_kind="at_least")
     elif sensor is not None:
         flow.update(from_charger=sensor, charger_kind="measured", laptop=sensor, laptop_kind="measured")
-    elif typical is not None:
-        flow.update(from_charger=typical, charger_kind="estimate", laptop=typical, laptop_kind="estimate")
+    elif inside is not None:
+        flow.update(from_charger=inside, charger_kind="at_least", laptop=inside, laptop_kind="at_least")
     return flow
 
 

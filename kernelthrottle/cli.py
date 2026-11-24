@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-from . import core, tuning
+from . import core, meter, tuning
 
 HELPER = "/usr/lib/kernelthrottle/kernelthrottle-helper"
 COMMANDS = ("status", "limit", "full", "topup", "calibrate", "performance", "fan", "unlock", "help")
@@ -26,15 +26,13 @@ def fmt_hours(hours):
 
 
 def fmt_watts(value, kind="measured"):
-    """A power reading with its certainty: 24.6 W, ≈ 24 W (estimate), ≥ 18 W (at least)."""
+    """A power reading with its certainty: 24.6 W measured, ≥ 18.2 W at least."""
     if value is None:
         return "—"
     if value == 0:
         return "0 W"
-    if kind == "estimate":
-        return f"≈ {value:.0f} W"
     if kind == "at_least":
-        return f"≥ {value:.0f} W"
+        return f"≥ {value:.1f} W"
     return f"{value:.1f} W"
 
 
@@ -52,17 +50,23 @@ def status():
     limit = backend.limit()
     print(f"Battery     {info['name']}  {info['capacity']}%  {info['status']}")
     print(f"Adapter     {'plugged in' if info['ac'] else 'on battery'}")
-    typical = core.typical_draw(core.load_history(time.time() - core.TYPICAL_DAYS * 86400))
     info["charger_power"] = core.charger_power() if info["ac"] else None
-    flow = core.power_flow(info, typical)
-    print(f"Charger     {fmt_watts(flow['from_charger'], flow['charger_kind'])}"
-          + {"estimate": "  (estimate: no charger sensor)", "at_least": "  (no charger sensor)",
-             "unknown": "  (no charger sensor)"}.get(flow["charger_kind"], ""))
+    parts = {"cpu": meter.cpu_power(), "gpus": meter.gpu_power()}
+    flow = core.power_flow(info, parts)
+    note = {"at_least": "  (no charger sensor: CPU + graphics measured)",
+            "unknown": "  (no charger sensor)"}.get(flow["charger_kind"], "")
+    print(f"Charger     {fmt_watts(flow['from_charger'], flow['charger_kind'])}{note}")
     if flow["into_battery"] is not None:
         print(f"Battery in  {fmt_watts(flow['into_battery'])}")
     else:
         print(f"Battery out {fmt_watts(flow['from_battery'])}")
     print(f"Laptop uses {fmt_watts(flow['laptop'], flow['laptop_kind'])}")
+    print(f"Processor   {fmt_watts(parts['cpu'])}" + ("" if parts["cpu"] is not None
+                                                     else "  (needs the KernelThrottle service)"))
+    for gpu in parts["gpus"]:
+        value = {"asleep": "asleep (about 0 W)", "unknown": "—  (no meter in the driver)",
+                 "idle": f"{fmt_watts(gpu['watts'])}  idle"}.get(gpu["state"], fmt_watts(gpu["watts"]))
+        print(f"Graphics    {value}  {gpu['name']}")
     remaining = core.time_remaining(info, limit or 100)
     if remaining is not None:
         verb = "to empty" if info["status"] == "Discharging" else "to target"

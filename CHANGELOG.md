@@ -18,6 +18,21 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Only measured power figures; processor and graphics card power
+- **Added:** processor power (the CPU's RAPL energy counter, read by the service and served to the
+  app on `/run/kernelthrottle/meter.sock` as an average of at least 1 s) and graphics card power
+  (NVIDIA through NVML, AMD through amdgpu), on the Overview, the Monitor tab and `kernelthrottle
+  status`.
+- **Removed:** the "≈" charger and laptop figures estimated from last week's typical battery draw.
+  On the charger without a charger sensor, "Laptop uses" and "From charger" are now "≥" the
+  measured processor plus graphics power.
+- **Why:** the estimate didn't follow the load (gaming on the charger showed the same ≈ 25 W as
+  idling) and read as made-up numbers.
+- **Lesson:** asking an NVIDIA card for its power wakes it and every question keeps it awake about
+  24 s, so reading every 2 s held an idle RTX 3060 at 10–22 W forever. A sleeping card is never
+  asked and an idle one only every 30 s (rule 51). A new `Window.parts` replaced the Performance
+  tab's attribute of the same name; only running the app showed it (rule 52).
+
 ### 2026-11-24: Named KernelThrottle; the uninstaller removes everything
 - **Changed:** the name is KernelThrottle (`kernelthrottle`, `dev.kernelthrottle.KernelThrottle`,
   icons `kt-*-symbolic`). "Powerkeeper" was never released; the entries below use the new name.

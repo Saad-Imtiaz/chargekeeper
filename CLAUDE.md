@@ -1,10 +1,10 @@
 # KernelThrottle
 
-Battery charge-limit and monitoring app for Linux laptops (Python, GTK 4 / libadwaita, root helper
-via polkit, systemd service).
+Battery charge limits, maximum performance, fan control and a live monitor for Linux laptops
+(Python, GTK 4 / libadwaita, root helper via polkit, systemd service). Formerly Chargekeeper.
 
 Before changing anything, read [MAINTAINING.md](MAINTAINING.md): architecture, the feature list,
-50 rules learned from real bugs in this project, and the checks to run before every commit.
+52 rules learned from real bugs in this project, and the checks to run before every commit.
 History is in [CHANGELOG.md](CHANGELOG.md).
 
 - Tests: `python3 -m unittest discover tests` (no root, no display).

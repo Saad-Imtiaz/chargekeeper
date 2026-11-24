@@ -15,7 +15,7 @@ gi.require_version("Gsk", "4.0")
 gi.require_version("Graphene", "1.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
 
-from . import APP_ID, VERSION, core, monitor, power, tray, tuning  # noqa: E402
+from . import APP_ID, VERSION, core, meter, monitor, power, tray, tuning  # noqa: E402
 from .cli import fmt_hours, fmt_watts, helper_command  # noqa: E402
 
 GREEN = (0.15, 0.73, 0.42)
@@ -64,6 +64,8 @@ PRESETS = (60, 70, 80, 85, 90)
 WINDOW_LIVE_SECONDS = 2
 SLOW_REFRESH_SECONDS = 10
 FAN_SECONDS = 2               # fan speeds while the Performance tab is on screen
+PARTS_SECONDS = 2             # processor and graphics power while Overview or Monitor is on screen
+WEEK_SECONDS = 7 * 86400
 CHART_SECONDS = 60
 CHART_PAGES = ("overview", "usage", "health")
 RANGES = (("6 hours", 6 * 3600), ("24 hours", 24 * 3600), ("7 days", 7 * 86400))
@@ -389,30 +391,41 @@ class PowerTile(Gtk.Box):
         self.update_property([Gtk.AccessibleProperty.LABEL], [f"{title}: {value}, {detail}"])
 
 
-KIND_WORDS = {"measured": "Measured", "estimate": "Estimated", "at_least": "Not measured",
+KIND_WORDS = {"measured": "Measured", "at_least": "At least: CPU + graphics measured",
               "unknown": "Not measured", "unplugged": "Not plugged in"}
 
 
 class PowerFlow(Gtk.Box):
-    """From the charger, from (or into) the battery, and what the laptop uses."""
+    """From the charger, from (or into) the battery, what the laptop uses, and the measured
+    processor and graphics power."""
 
     def __init__(self):
-        super().__init__(spacing=10, homogeneous=True)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        top = Gtk.Box(spacing=10, homogeneous=True)
+        parts = Gtk.Box(spacing=10, homogeneous=True)
         self.charger = PowerTile("charger", "ac-adapter-symbolic")
         self.battery = PowerTile("battery", "battery-good-symbolic")
         self.laptop = PowerTile("laptop", "computer-symbolic")
+        self.cpu = PowerTile("cpu", "kt-cpu-symbolic")
+        self.gpu = PowerTile("gpu", "video-display-symbolic")
         for tile in (self.charger, self.battery, self.laptop):
-            self.append(tile)
+            top.append(tile)
+        for tile in (self.cpu, self.gpu):
+            parts.append(tile)
+        self.append(top)
+        self.append(parts)
+        self.tiles = (self.charger, self.battery, self.laptop, self.cpu, self.gpu)
 
-    def update(self, info, typical):
+    def update(self, info, parts=None):
         """Show a battery reading; returns the explanation for any figure that isn't measured."""
+        self._show_parts(parts)
         if not info:
             for tile, title in ((self.charger, "From charger"), (self.battery, "From battery"),
                                 (self.laptop, "Laptop uses")):
                 tile.set(title, "—", "No battery found", False)
             self.set_tooltip_text(None)
             return ""
-        flow = core.power_flow(info, typical)
+        flow = core.power_flow(info, parts)
         self.charger.set("From charger", fmt_watts(flow["from_charger"], flow["charger_kind"]),
                          KIND_WORDS[flow["charger_kind"]], flow["source"] in ("charger", "both"))
         if flow["into_battery"] is not None or info["status"] == "Charging":
@@ -429,14 +442,34 @@ class PowerFlow(Gtk.Box):
                         KIND_WORDS[flow["laptop_kind"]], False)
 
         note = ""
-        if flow["charger_kind"] == "estimate":
-            note = (f"This laptop has no sensor for charger power. ≈ figures use your typical draw on "
-                    f"battery ({typical:.0f} W over the last week), so they won't follow a heavy load.")
-        elif flow["charger_kind"] in ("at_least", "unknown"):
-            note = ("This laptop has no sensor for charger power. After about 10 minutes on battery, "
-                    "KernelThrottle can estimate it from your typical draw.")
+        if flow["charger_kind"] in ("at_least", "unknown"):
+            note = ("This laptop has no sensor for the power it takes from the charger, so on the "
+                    "charger KernelThrottle shows what is measured: the processor and graphics card. "
+                    "The screen, memory and the rest add to that, so the total is at least this. "
+                    "On battery the whole laptop is measured.")
         self.set_tooltip_text(note or None)
         return note
+
+    def _show_parts(self, parts):
+        cpu = (parts or {}).get("cpu")
+        self.cpu.set("Processor", fmt_watts(cpu),
+                     "Measured (RAPL)" if cpu is not None else "No meter, or service not running", False)
+        gpus = (parts or {}).get("gpus") or []
+        if not gpus:
+            self.gpu.set("Graphics card", "—", "Built into the processor" if parts else "Not measured", False)
+            return
+        if any(g["state"] == "unknown" for g in gpus):
+            self.gpu.set("Graphics card", "—", "No meter in the driver", False)
+            return
+        watts = sum(g["watts"] for g in gpus)
+        states = {g["state"] for g in gpus}
+        if states == {"asleep"}:
+            self.gpu.set("Graphics card", "Asleep", "Powered off, about 0 W", False)
+        elif "measured" in states:
+            self.gpu.set("Graphics card", fmt_watts(watts), "Measured (driver)", True)
+        else:
+            # Asking wakes the card up, so an idle one is only asked every 30 s.
+            self.gpu.set("Graphics card", fmt_watts(watts), "Idle, measured every 30 s", False)
 
 
 # --- small builders --------------------------------------------------------
@@ -486,7 +519,9 @@ class Window(Adw.ApplicationWindow):
         self.history_range = RANGES[1][1]
         self.usage_days = USAGE_RANGES[0][1]
         self.last_chart = 0
-        self.typical = None
+        self.power_parts = None
+        self.parts_timer = 0
+        self.parts_reading = False
         self.notice_seen = 0
 
         self.toasts = Adw.ToastOverlay()
@@ -529,7 +564,7 @@ class Window(Adw.ApplicationWindow):
             breakpoint.add_setter(switcher, "visible", False)
             if not tile_icons:      # three tiles side by side: their titles need the room
                 for flow in (self.power_flow, self.monitor_page.power):
-                    for tile in (flow.charger, flow.battery, flow.laptop):
+                    for tile in flow.tiles:
                         breakpoint.add_setter(tile.icon, "visible", False)
             self.add_breakpoint(breakpoint)
         view.set_content(self.stack)
@@ -559,6 +594,7 @@ class Window(Adw.ApplicationWindow):
             self._show_battery(self.app.live.info)
         else:
             self.app.live.release("window")
+        self._parts_live(seen and page in ("overview", "monitor"))
         if seen and page in CHART_PAGES and time.time() - self.last_chart > CHART_SECONDS:
             self.refresh_charts()
 
@@ -578,7 +614,7 @@ class Window(Adw.ApplicationWindow):
         if page == "overview":
             self._refresh_overview(info, self.backend, self.config, self.effective)
         elif page == "monitor":
-            self.monitor_page.power.update(info, self.typical)
+            self.monitor_page.power.update(info, self.power_parts)
 
     def _on_close(self, *_):
         if self.app.prefs["background"]:
@@ -590,6 +626,7 @@ class Window(Adw.ApplicationWindow):
         GLib.source_remove(self.timer)
         self.monitor_page.set_active(False)
         self._fans_live(False)
+        self._parts_live(False)
         self.app.live.release("window")
         self.app.live.listeners.remove(self._on_battery)
         self.app.window = None
@@ -889,6 +926,33 @@ class Window(Adw.ApplicationWindow):
             self.max_row.set_subtitle(", ".join(text for _, text in parts))
         else:
             self.max_row.set_subtitle("Nothing on this laptop can be raised from Linux")
+        return GLib.SOURCE_REMOVE
+
+    def _parts_live(self, active):
+        """Processor and graphics power, read every PARTS_SECONDS while a power view is shown."""
+        if active and not self.parts_timer:
+            self._parts_tick()
+            self.parts_timer = GLib.timeout_add_seconds(PARTS_SECONDS, self._parts_tick)
+        elif not active and self.parts_timer:
+            GLib.source_remove(self.parts_timer)
+            self.parts_timer = 0
+
+    def _parts_tick(self):
+        # NVML takes a few milliseconds (over a second the first time), so read in a thread.
+        if not self.parts_reading:
+            self.parts_reading = True
+
+            def read():
+                parts = {"cpu": meter.cpu_power(), "gpus": meter.gpu_power()}
+                GLib.idle_add(self._show_power_parts, parts)
+            threading.Thread(target=read, daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
+    def _show_power_parts(self, parts):
+        self.parts_reading = False
+        self.power_parts = parts
+        if self.parts_timer:
+            self._show_battery(self.app.live.info)
         return GLib.SOURCE_REMOVE
 
     def _fans_live(self, active):
@@ -1261,7 +1325,7 @@ class Window(Adw.ApplicationWindow):
         self.v_temp.set_label(f"{temp:.1f} °C" if temp is not None else "Not reported")
 
     def _show_flow(self, info):
-        note = self.power_flow.update(info, self.typical)
+        note = self.power_flow.update(info, self.power_parts)
         self.power_note.set_label(note)
         self.power_note.set_visible(bool(note))
 
@@ -1438,9 +1502,7 @@ class Window(Adw.ApplicationWindow):
         self.last_chart = time.time()
         now = time.time()
         t0 = now - self.history_range
-        week = core.load_history(now - core.TYPICAL_DAYS * 86400)
-        self.typical = core.typical_draw(week)
-        self._show_battery(self.app.live.info)     # the estimate may have just become available
+        week = core.load_history(now - WEEK_SECONDS)
         points = [p for p in week if p["t"] >= t0]
         step = max(1, len(points) // 600)
         sampled = points[::step]

@@ -264,18 +264,20 @@ class FullTests(unittest.TestCase):
 class PowerFlowTests(unittest.TestCase):
     """What the charger and the battery each supply, and how far to trust it."""
 
-    def flow(self, status, ac, power, typical=None, sensor=None):
-        return core.power_flow({"status": status, "ac": ac, "power": power, "charger_power": sensor}, typical)
+    def flow(self, status, ac, power, parts=None, sensor=None):
+        return core.power_flow({"status": status, "ac": ac, "power": power, "charger_power": sensor}, parts)
+
+    PARTS = {"cpu": 15.0, "gpus": [{"name": "NVIDIA graphics", "watts": 5.5, "state": "measured"}]}
 
     def test_on_battery_is_measured(self):
-        f = self.flow("Discharging", False, 24.5, typical=30)
+        f = self.flow("Discharging", False, 24.5, parts=self.PARTS)
         self.assertEqual((f["source"], f["from_battery"], f["from_charger"]), ("battery", 24.5, 0.0))
         self.assertEqual((f["laptop"], f["laptop_kind"], f["charger_kind"]), (24.5, "measured", "unplugged"))
 
-    def test_charging_without_sensor_estimates_from_typical_draw(self):
-        f = self.flow("Charging", True, 40.0, typical=20.0)
-        self.assertEqual((f["into_battery"], f["from_charger"], f["charger_kind"]), (40.0, 60.0, "estimate"))
-        self.assertEqual((f["laptop"], f["laptop_kind"], f["source"]), (20.0, "estimate", "charger"))
+    def test_charging_without_sensor_is_a_measured_lower_bound(self):
+        f = self.flow("Charging", True, 40.0, parts=self.PARTS)
+        self.assertEqual((f["into_battery"], f["from_charger"], f["charger_kind"]), (40.0, 60.5, "at_least"))
+        self.assertEqual((f["laptop"], f["laptop_kind"], f["source"]), (20.5, "at_least", "charger"))
         self.assertIsNone(f["from_battery"])
 
     def test_charging_without_any_data_gives_a_lower_bound_only(self):
@@ -285,12 +287,21 @@ class PowerFlowTests(unittest.TestCase):
 
     def test_held_at_limit_runs_on_the_charger(self):
         # A held battery can report a small current; it isn't powering anything.
-        f = self.flow("Not charging", True, 0.2, typical=22.0)
-        self.assertEqual((f["from_battery"], f["from_charger"], f["charger_kind"]), (0.0, 22.0, "estimate"))
+        f = self.flow("Not charging", True, 0.2, parts=self.PARTS)
+        self.assertEqual((f["from_battery"], f["from_charger"], f["charger_kind"]), (0.0, 20.5, "at_least"))
         self.assertEqual(self.flow("Full", True, 0.0)["charger_kind"], "unknown")
 
+    def test_never_a_guess(self):
+        # Without the processor's meter nothing is shown, however much history there is.
+        f = self.flow("Not charging", True, 0.0, parts={"cpu": None, "gpus": self.PARTS["gpus"]})
+        self.assertEqual((f["from_charger"], f["laptop"], f["laptop_kind"]), (None, None, "unknown"))
+        # A sleeping graphics card counts as 0 W; one without a meter isn't added.
+        asleep = {"cpu": 9.0, "gpus": [{"name": "NVIDIA graphics", "watts": 0.0, "state": "asleep"},
+                                       {"name": "AMD graphics", "watts": None, "state": "unknown"}]}
+        self.assertEqual(self.flow("Not charging", True, 0.0, parts=asleep)["laptop"], 9.0)
+
     def test_a_real_sensor_wins(self):
-        f = self.flow("Charging", True, 40.0, typical=20.0, sensor=65.0)
+        f = self.flow("Charging", True, 40.0, parts=self.PARTS, sensor=65.0)
         self.assertEqual((f["from_charger"], f["charger_kind"], f["laptop"], f["laptop_kind"]),
                          (65.0, "measured", 25.0, "measured"))
         f = self.flow("Not charging", True, 0.0, sensor=18.0)
@@ -301,20 +312,14 @@ class PowerFlowTests(unittest.TestCase):
         f = self.flow("Discharging", True, 30.0)
         self.assertEqual((f["source"], f["from_battery"], f["from_charger"]), ("battery", 30.0, None))
         self.assertEqual((f["laptop"], f["laptop_kind"]), (30.0, "at_least"))
+        f = self.flow("Discharging", True, 10.0, parts=self.PARTS)
+        self.assertEqual((f["laptop"], f["laptop_kind"]), (20.5, "at_least"))
         f = self.flow("Discharging", True, 30.0, sensor=45.0)
         self.assertEqual((f["source"], f["laptop"], f["laptop_kind"]), ("both", 75.0, "measured"))
 
     def test_steady_reading_is_preferred(self):
         f = core.power_flow({"status": "Discharging", "ac": False, "power": 90.0, "power_steady": 25.0})
         self.assertEqual(f["from_battery"], 25.0)
-
-    def test_typical_draw(self):
-        def point(power, status="Discharging", ac=False):
-            return {"power": power, "status": status, "ac": ac}
-        self.assertIsNone(core.typical_draw([point(20)] * 9))       # too little to go on
-        points = [point(20)] * 9 + [point(90)] * 2                  # a spike doesn't move a median
-        points += [point(60, "Charging", True), point(0.1), point(60, "Discharging", True)]
-        self.assertEqual(core.typical_draw(points), 20)
 
     def test_power_series_splits_and_breaks_lines(self):
         def point(t, status, power=10.0):

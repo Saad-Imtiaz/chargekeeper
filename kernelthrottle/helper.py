@@ -7,7 +7,7 @@ import select
 import sys
 import time
 
-from . import core, power, tuning
+from . import core, meter, power, tuning
 
 # The daemon sleeps until a kernel power_supply event (charger plugged or unplugged,
 # charging state or level changed, resume) or until the next deadline below.
@@ -130,20 +130,27 @@ def next_interval(backend, config, info):
     return IDLE_SECONDS
 
 
-def wait_for_event(events, timeout):
-    """Sleep up to timeout seconds; return early (True) on a power_supply event."""
+def wait_for_event(events, timeout, meter=None):
+    """Sleep up to timeout seconds; return early (True) on a power_supply event.
+
+    Requests to the power meter socket are answered while waiting, without running a cycle.
+    """
     deadline = time.monotonic() + timeout
     fd = events.fileno()
+    meter_fd = meter.fileno() if meter else None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        if fd is None:
+        fds = [f for f in (fd, meter_fd) if f is not None]
+        if not fds:
             time.sleep(remaining)
             return False
-        ready, _, _ = select.select([fd], [], [], remaining)
+        ready, _, _ = select.select(fds, [], [], remaining)
+        if meter_fd is not None and meter_fd in ready:
+            meter.handle()
         # Other subsystems' events wake us too; keep waiting unless one was ours.
-        if ready and events.drain():
+        if fd in ready and events.drain():
             time.sleep(power.DEBOUNCE_MS / 1000)     # let a burst of events settle
             events.drain()
             return True
@@ -168,6 +175,7 @@ def cmd_daemon(args):
     events = power.UeventMonitor()
     if events.fileno() is None:
         print("Kernel events unavailable; polling instead", file=sys.stderr, flush=True)
+    power_meter = meter.MeterServer()
     while True:
         error = None
         backend = config = info = None
@@ -257,7 +265,7 @@ def cmd_daemon(args):
         except Exception:   # never let scheduling stop enforcement
             interval = SOFTWARE_NEAR_SECONDS
         until_log = last_log + LOG_SECONDS - time.time()
-        wait_for_event(events, max(1.0, min(interval, until_log)))
+        wait_for_event(events, max(1.0, min(interval, until_log)), power_meter)
 
 
 def main(argv=None):
