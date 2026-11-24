@@ -502,6 +502,10 @@ class Window(Adw.ApplicationWindow):
 
         bottom = Adw.ViewSwitcherBar(stack=self.stack)
         view.add_bottom_bar(bottom)
+        # The version on every tab, so a screenshot or a bug report always shows it.
+        footer = Gtk.Label(label=f"Powerkeeper {VERSION}", css_classes=["dim-label", "caption"],
+                           margin_top=4, margin_bottom=6)
+        view.add_bottom_bar(footer)
         self._build_overview()
         self._build_usage()
         self._build_monitor()

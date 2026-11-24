@@ -18,6 +18,10 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Version 1.2.0 shown at the bottom of the window
+- **Added:** "Powerkeeper 1.2.0" under every tab, so screenshots and bug reports show the version.
+- **Changed:** `VERSION` is 1.2.0 (the rename, performance and fan features).
+
 ### 2026-11-24: Explain fan speeds without fan control
 - **Fixed:** the Performance tab showed fan speeds with no fan control and no word why. It now says
   Linux can read the speeds but not set them.
