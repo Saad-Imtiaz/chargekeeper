@@ -4,8 +4,8 @@
 <policyconfig>
   <vendor>Chargekeeper</vendor>
   <action id="dev.chargekeeper.Chargekeeper.helper">
-    <description>Change battery charging settings</description>
-    <message>Authentication is required to change battery charging settings</message>
+    <description>Change battery, performance and fan settings</description>
+    <message>Authentication is required to change battery, performance and fan settings</message>
     <icon_name>dev.chargekeeper.Chargekeeper</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>

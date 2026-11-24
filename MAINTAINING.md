@@ -26,21 +26,24 @@ compiled code and no dependencies beyond what GNOME desktops ship.
 
 | File | What it does |
 |---|---|
+| `chargekeeper/tuning.py` | Fans (hwmon pwm with per-driver rules, MSI Cooler Boost), maximum performance (save, apply, restore), driver options that unlock makers' controls |
 | `chargekeeper/core.py` | Battery reading (one `uevent` read per supply), firmware backends and their quirks, config, history and usage logs, the per-app CPU sampler used by the service |
 | `chargekeeper/power.py` | Live readings: kernel uevent listener, power estimator, `LiveBattery` (shared by window, tray, notifications) |
-| `chargekeeper/helper.py` | Root entry point: `set`, `apply`, `release`, `platform-profile`, `epp`, and the `daemon` loop |
-| `chargekeeper/gui.py` | The window (Overview, Usage, Charging, Health, Settings) and the `App` (tray, notifications) |
+| `chargekeeper/helper.py` | Root entry point: `set`, `apply`, `release`, `platform-profile`, `epp`, `unlock`, and the `daemon` loop |
+| `chargekeeper/gui.py` | The window (Overview, Usage, Performance, Charging, Health, Settings) and the `App` (tray, notifications) |
 | `chargekeeper/monitor_page.py` | The Monitor tab (cards, sparklines, temperature tiles) |
 | `chargekeeper/monitor.py` | Processor, memory, disk, network and temperature readings; app names and icons |
 | `chargekeeper/tray.py` | Tray icon and menu: StatusNotifierItem + dbusmenu over a raw D-Bus connection |
-| `chargekeeper/cli.py` | `chargekeeper status / limit / full / calibrate` |
+| `chargekeeper/cli.py` | `chargekeeper status / limit / full / calibrate / performance / fan / unlock` |
 | `data/` | systemd unit, resume hook, polkit policy and rule, desktop file, icons |
 | `install.sh`, `uninstall.sh` | System-wide install and removal |
 | `tests/` | Unit tests (no root, no display needed) |
 | `tools/` | Test tools: run from source, soak test, nested GNOME Shell, screenshots, leak test |
 
 Where things live once installed: `/usr/lib/chargekeeper/` (code), `/etc/chargekeeper/config.json`
-(limit settings), `/var/lib/chargekeeper/` (history, health, usage), `/run/chargekeeper/state.json`
+(limit, performance and fan settings), `/var/lib/chargekeeper/` (history, health, usage, values
+saved before maximum performance or fan control), `/etc/modprobe.d/chargekeeper-*.conf` (driver
+options from "Turn on"), `/run/chargekeeper/state.json`
 (service status), `~/.config/chargekeeper/prefs.json` (per-user notification and tray settings).
 
 ## Features
@@ -99,9 +102,29 @@ Each line names where the code lives. Keep this list complete.
 - Readings taken when the menu opens and every 2 s while it stays open; nothing while closed.
 - Offers to enable GNOME's AppIndicator extension when no tray host is running.
 
+**Performance and fans** (`tuning.py`, `helper.py`, Performance tab in `gui.py`)
+- Maximum performance: power-profiles daemon (or TLP's `tlp-pd`) to performance, highest firmware
+  profile (`max-power`, `performance`, `balanced-performance`), CPU energy preference (or governor
+  without EPP), turbo, MSI shift mode, ASUS `ppt_*` limits, NVIDIA Dynamic Boost. `apply_max`
+- Saved and restored: values before the switch, put back when it's off, on battery with "Only while
+  plugged in", and when the service stops. `capture`, `restore`, `release`
+- Re-applied by the service on mismatch (Acer firmware drops Turbo on unplug); the process-starting
+  parts only on a change or every 10 minutes. `ensure(deep=)`, `helper.DEEP_SECONDS`
+- Fan control: automatic, full speed, fixed speed (20–100%), per-driver `pwm_enable` rules,
+  MSI Cooler Boost; "automatic" never touches a fan the app didn't change. `FAN_RULES`,
+  `ensure_fans`
+- Fan safety: fixed speed returns to automatic at 90 °C, checked every 5 s only while fixed;
+  the window shows the service's notice. `fans_too_hot`, `helper.FAN_WATCH_SECONDS`
+- Live fan speeds on the Performance tab, every 2 s in a short-lived thread, only while visible.
+- Driver options that unlock hidden controls (Acer Predator `predator_v4`, ThinkPad
+  `fan_control`): modprobe.d file plus driver reload, or a restart if the driver is busy. `UNLOCKS`
+- NVIDIA Dynamic Boost service and D-Bus policy added by the installer where the driver lacks them.
+- CLI: `performance on|off|ac`, `fan auto|max|PERCENT`, `unlock ID`; fans in `status`.
+
 **App and system**
 - Notifications: unplug reminder, limit reached, charge to full done, low battery, battery too hot.
-- Power mode (power-profiles-daemon), firmware platform profile, CPU energy preference.
+- Power mode (power-profiles-daemon), firmware platform profile, CPU energy preference
+  (Performance tab).
 - Diagnostics: detects the missing Acer driver and conflicting TLP thresholds; copy report.
 - Polkit: administrators at the active local seat need no password; others authenticate.
 - CLI: status, limit, full (alias topup), calibrate.
@@ -200,6 +223,21 @@ Each rule comes from a real bug in this project. The CHANGELOG entry has the det
     cairo. There 30 frames a second cost 21% of a core; with the GPU on the reference laptop it cost
     about 1.4%, and battery power didn't measurably change. Keep per-frame work to moving a cached
     drawing: rebuilding paths point by point is thousands of PyGObject calls a frame.
+
+### Fans and performance
+
+47. **`pwmN_enable` means different things per driver.** ThinkPad, ASUS and HP use 0 for full
+    speed; Acer and Dell use 1 (manual) with pwm 255; ASUS has no manual mode at all; desktop
+    chips have several automatic modes. Keep these in `tuning.FAN_RULES`, give "automatic" back
+    the value found before, and never touch a fan the app didn't change.
+48. **A power-profiles daemon may be TLP.** TLP 1.9+ answers on `net.hadess.PowerProfiles`
+    (`tlp-pd`), and its "performance" keeps EPP at `balance_performance`. Ask the daemon, then set
+    the firmware profile and CPU directly too.
+49. **Nothing in the service loop starts a process every cycle.** `busctl` and `systemctl` run only
+    on a change (switching on, charger events) or every 10 minutes (`ensure(deep=)`), and a failed
+    Dynamic Boost start isn't retried until maximum performance is switched off and on.
+50. **Some makers' controls are in the kernel but switched off.** On the Acer Predator PH315-55,
+    Turbo and fan control need `acer_wmi predator_v4=1` (the model isn't on the driver's list).
 
 ### Tray (GNOME AppIndicator extension)
 

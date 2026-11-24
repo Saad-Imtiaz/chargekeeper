@@ -7,7 +7,7 @@ import select
 import sys
 import time
 
-from . import core, power
+from . import core, power, tuning
 
 # The daemon sleeps until a kernel power_supply event (charger plugged or unplugged,
 # charging state or level changed, resume) or until the next deadline below.
@@ -16,6 +16,8 @@ ACTIVE_SECONDS = 30         # calibration or a charge to full is running
 SOFTWARE_SECONDS = 20       # software limit while charging...
 SOFTWARE_NEAR_SECONDS = 5   # ...and within SOFTWARE_NEAR_PERCENT of the limit
 SOFTWARE_NEAR_PERCENT = 3
+FAN_WATCH_SECONDS = 5       # a fixed fan speed is on: watch the CPU temperature
+DEEP_SECONDS = 600          # re-check the power-profiles daemon and Dynamic Boost (processes)
 LOG_SECONDS = 60
 
 
@@ -56,6 +58,14 @@ def cmd_set(args):
         if args.charge_type not in backend.charge_types():
             sys.exit(f"Charge type '{args.charge_type}' is not supported here")
         config["charge_type"] = args.charge_type
+    if args.performance is not None:
+        config["performance"] = args.performance
+    if args.fan_mode is not None:
+        if args.fan_mode != "auto" and args.fan_mode not in tuning.fan_modes():
+            sys.exit(f"Fan mode '{args.fan_mode}' is not supported here")
+        config["fan_mode"] = args.fan_mode
+    if args.fan_percent is not None:
+        config["fan_percent"] = max(tuning.FAN_MIN_PERCENT, args.fan_percent)
     if args.calibration is not None:
         backend.set_calibration(args.calibration)
         config["calibrating"] = args.calibration
@@ -63,9 +73,19 @@ def cmd_set(args):
 
     core.save_config(config)
     core.apply(backend, config)
+    info = core.combined_info()
     if backend.software:
-        info = core.combined_info()
         core.enforce_software(backend, config, info and info["capacity"])
+    errors = tuning.ensure(config, info["ac"] if info else core.ac_online())
+    asked = (args.performance, args.fan_mode, args.fan_percent)
+    if errors and any(value is not None for value in asked):
+        sys.exit("; ".join(errors))
+
+
+def cmd_unlock(args):
+    message = tuning.apply_unlock(args.id)
+    if message:
+        print(message)
 
 
 def cmd_platform_profile(args):
@@ -83,11 +103,15 @@ def cmd_epp(args):
 
 
 def cmd_apply(args):
-    core.apply(core.detect(), core.load_config())
+    config = core.load_config()
+    core.apply(core.detect(), config)
+    tuning.ensure(config, core.ac_online())
 
 
 def cmd_release(args):
     core.release(core.detect())
+    for error in tuning.release():
+        print(error, file=sys.stderr)
 
 
 def next_interval(backend, config, info):
@@ -99,6 +123,8 @@ def next_interval(backend, config, info):
             if info["capacity"] >= wanted[0] - SOFTWARE_NEAR_PERCENT:
                 return SOFTWARE_NEAR_SECONDS
             return SOFTWARE_SECONDS
+    if config and config.get("fan_mode") == "fixed":
+        return FAN_WATCH_SECONDS
     if config and (config["calibrating"] or config["top_up"]):
         return ACTIVE_SECONDS
     return IDLE_SECONDS
@@ -135,6 +161,8 @@ def write_state(state):
 def cmd_daemon(args):
     last_ac = None
     last_log = 0
+    last_deep = 0
+    notice = None
     full_since = None
     sampler = core.CpuSampler()
     events = power.UeventMonitor()
@@ -182,6 +210,22 @@ def cmd_daemon(args):
             if backend.software:
                 core.enforce_software(backend, config, info and info["capacity"])
 
+            # A fixed fan speed must never let the processor overheat: the firmware takes over.
+            cpu_temp = core.cpu_info()["temperature"] if config["fan_mode"] == "fixed" else None
+            if tuning.fans_too_hot(config["fan_mode"], cpu_temp):
+                config["fan_mode"] = "auto"
+                core.save_config(config)
+                notice = {"time": time.time(),
+                          "text": f"The processor reached {cpu_temp:.0f} °C, so the fans are "
+                                  "back on automatic control"}
+                print(notice["text"], file=sys.stderr, flush=True)
+            deep = ac != last_ac or time.time() - last_deep > DEEP_SECONDS
+            tuning_errors = tuning.ensure(config, ac, deep)
+            if deep:
+                last_deep = time.time()
+            if tuning_errors:
+                error = "; ".join(tuning_errors)
+
             if info and time.time() - last_log >= LOG_SECONDS:
                 core.log_sample(info)
                 # Per-app usage is only recorded on battery, so only scan /proc then: on
@@ -204,6 +248,7 @@ def cmd_daemon(args):
                 "updated": time.time(),
                 "backend": backend.id if backend else None,
                 "error": error,
+                "notice": notice,
             })
         except OSError as exc:
             print(f"Cannot write state: {exc}", file=sys.stderr, flush=True)
@@ -227,6 +272,9 @@ def main(argv=None):
     s.add_argument("--behaviour", choices=("auto", "inhibit-charge", "force-discharge"))
     s.add_argument("--charge-type")
     s.add_argument("--calibration", type=_bool)
+    s.add_argument("--performance", choices=("off", "on", "ac"))
+    s.add_argument("--fan-mode", choices=("auto", "max", "fixed"))
+    s.add_argument("--fan-percent", type=_percent)
     s.set_defaults(func=cmd_set)
 
     p = sub.add_parser("platform-profile")
@@ -236,6 +284,10 @@ def main(argv=None):
     e = sub.add_parser("epp")
     e.add_argument("value")
     e.set_defaults(func=cmd_epp)
+
+    u = sub.add_parser("unlock", help="turn on a maker's hidden driver features")
+    u.add_argument("id", choices=[x["id"] for x in tuning.UNLOCKS])
+    u.set_defaults(func=cmd_unlock)
 
     sub.add_parser("apply").set_defaults(func=cmd_apply)
     sub.add_parser("release").set_defaults(func=cmd_release)

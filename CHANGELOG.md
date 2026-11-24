@@ -18,6 +18,22 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Fan control and maximum performance in the service
+- **Added:** `tuning.py`. Fan control through hwmon `pwmN`/`pwmN_enable` with per-driver rules
+  (Acer, ThinkPad, ASUS, HP, Dell, generic) and MSI Cooler Boost. Maximum performance: the
+  power-profiles daemon, the highest firmware profile (Legion `max-power` first), CPU energy
+  preference `performance`, turbo boost, MSI shift mode, ASUS power limits, NVIDIA Dynamic Boost.
+  Previous values are saved in `/var/lib/chargekeeper/performance-saved.json` and restored when
+  switched off, on battery (option), and when the service stops. Driver options that unlock
+  hidden controls: Acer `predator_v4`, ThinkPad `fan_control` (`chargekeeper-helper unlock`).
+  CLI: `chargekeeper performance on|off|ac`, `chargekeeper fan auto|max|PERCENT`,
+  `chargekeeper unlock ID`; `status` shows fans and performance.
+- **Safety:** a fixed fan speed has a 20% floor and goes back to automatic at 90 °C; the service
+  then checks the temperature every 5 s, only while a fixed speed is set.
+- **Why:** on the reference Acer Predator the Turbo profile and fan control are in the kernel but
+  hidden behind `acer_wmi predator_v4=1`, and TLP's "performance" leaves the CPU at
+  `balance_performance`.
+
 ## 1.1.0 (2026-11-03)
 
 ### 2026-11-03: First public release

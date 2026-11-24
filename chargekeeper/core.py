@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "charge_type": None,
     "calibrating": False,
     "calibration_started": None,
+    "performance": "off",       # off, on, or ac (only while plugged in)
+    "fan_mode": "auto",         # auto, max, or fixed
+    "fan_percent": 60,
 }
 
 HISTORY_KEEP_LINES = 14 * 24 * 60

@@ -1,14 +1,14 @@
-"""Terminal interface: `chargekeeper status|limit|full|calibrate`."""
+"""Terminal interface: `chargekeeper status|limit|full|calibrate|performance|fan|unlock`."""
 
 import os
 import subprocess
 import sys
 import time
 
-from . import core
+from . import core, tuning
 
 HELPER = "/usr/lib/chargekeeper/chargekeeper-helper"
-COMMANDS = ("status", "limit", "full", "topup", "calibrate", "help")
+COMMANDS = ("status", "limit", "full", "topup", "calibrate", "performance", "fan", "unlock", "help")
 
 
 def helper_command(*args):
@@ -36,6 +36,10 @@ def fmt_watts(value, kind="measured"):
     if kind == "at_least":
         return f"≥ {value:.0f} W"
     return f"{value:.1f} W"
+
+
+PERFORMANCE_NAMES = {"off": "usual settings", "on": "maximum",
+                     "ac": "maximum while plugged in"}
 
 
 def status():
@@ -82,6 +86,19 @@ def status():
             print(f"Limit       {limit}%" + (f" (resume below {start}%)" if start else ""))
         else:
             print("Limit       off")
+    print()
+    print(f"Performance {PERFORMANCE_NAMES[config['performance']]}")
+    found = tuning.fans()
+    modes = tuning.fan_modes(found)
+    if modes:
+        mode = config["fan_mode"]
+        print(f"Fans        " + (f"fixed at {config['fan_percent']}%" if mode == "fixed"
+                                  else {"auto": "automatic", "max": "full speed"}[mode]))
+    for label, rpm in tuning.fan_speeds(found):
+        if rpm is not None:
+            print(f"  {label:<10}{rpm} RPM")
+    for unlock in tuning.unlocks():
+        print(f"\n! {unlock['title']}\n  Turn on with: chargekeeper unlock {unlock['id']}")
     for hint in core.hints():
         print(f"\n! {hint['title']}\n  {hint['body']}")
     state = core.daemon_state()
@@ -105,10 +122,23 @@ def main(argv):
         return subprocess.call(helper_command("set", "--top-up", rest[0] if rest else "on"))
     if command == "calibrate" and len(rest) == 1:
         return subprocess.call(helper_command("set", "--calibration", rest[0]))
+    if command == "performance" and len(rest) == 1 and rest[0] in ("on", "off", "ac"):
+        return subprocess.call(helper_command("set", "--performance", rest[0]))
+    if command == "fan" and len(rest) == 1:
+        if rest[0] in ("auto", "max"):
+            return subprocess.call(helper_command("set", "--fan-mode", rest[0]))
+        if rest[0].rstrip("%").isdigit():
+            return subprocess.call(helper_command("set", "--fan-mode", "fixed",
+                                                  "--fan-percent", rest[0].rstrip("%")))
+    if command == "unlock" and len(rest) == 1:
+        return subprocess.call(helper_command("unlock", rest[0]))
     print("usage: chargekeeper [status]\n"
           "       chargekeeper limit <20-100|off>\n"
           "       chargekeeper full [on|off]       charge to 100% once, until unplugged\n"
           "       chargekeeper calibrate <on|off>\n"
+          "       chargekeeper performance <on|off|ac>  maximum performance (ac: only plugged in)\n"
+          "       chargekeeper fan <auto|max|20-100>    fan control (a number: fixed speed in %)\n"
+          "       chargekeeper unlock <id>             turn on a maker's hidden driver features\n"
           "       chargekeeper                     (no arguments in a desktop: open the app)",
           file=sys.stderr)
     return 2
