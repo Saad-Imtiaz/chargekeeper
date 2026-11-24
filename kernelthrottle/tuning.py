@@ -497,7 +497,7 @@ UNLOCKS = (
 
 
 def _conf_path(unlock):
-    return f"{MODPROBE_DIR}/powerkeeper-{unlock['id']}.conf"
+    return f"{MODPROBE_DIR}/kernelthrottle-{unlock['id']}.conf"
 
 
 def _unlock_active(unlock):
@@ -531,7 +531,7 @@ def apply_unlock(unlock_id):
         raise ValueError(f"unknown option '{unlock_id}'")
     os.makedirs(MODPROBE_DIR, exist_ok=True)
     with open(_conf_path(unlock), "w") as f:
-        f.write(f"# Written by Powerkeeper: {unlock['title'].lower()} otherwise.\n"
+        f.write(f"# Written by KernelThrottle: {unlock['title'].lower()} otherwise.\n"
                 f"options {unlock['module']} {unlock['option']}={unlock['value']}\n")
     code, _ = _run(["modprobe", "-r", unlock["module"]], 30)
     if code == 0:

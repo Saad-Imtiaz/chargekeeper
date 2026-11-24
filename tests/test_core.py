@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from powerkeeper import core  # noqa: E402
+from kernelthrottle import core  # noqa: E402
 
 
 

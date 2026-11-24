@@ -1,4 +1,4 @@
-"""Terminal interface: `powerkeeper status|limit|full|calibrate|performance|fan|unlock`."""
+"""Terminal interface: `kernelthrottle status|limit|full|calibrate|performance|fan|unlock`."""
 
 import os
 import subprocess
@@ -7,13 +7,13 @@ import time
 
 from . import core, tuning
 
-HELPER = "/usr/lib/powerkeeper/powerkeeper-helper"
+HELPER = "/usr/lib/kernelthrottle/kernelthrottle-helper"
 COMMANDS = ("status", "limit", "full", "topup", "calibrate", "performance", "fan", "unlock", "help")
 
 
 def helper_command(*args):
     path = HELPER if os.path.exists(HELPER) else os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "powerkeeper-helper")
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "kernelthrottle-helper")
     prefix = [] if os.geteuid() == 0 else ["pkexec"]
     return prefix + [path, *args]
 
@@ -98,12 +98,12 @@ def status():
         if rpm is not None:
             print(f"  {label:<10}{rpm} RPM")
     for unlock in tuning.unlocks():
-        print(f"\n! {unlock['title']}\n  Turn on with: powerkeeper unlock {unlock['id']}")
+        print(f"\n! {unlock['title']}\n  Turn on with: kernelthrottle unlock {unlock['id']}")
     for hint in core.hints():
         print(f"\n! {hint['title']}\n  {hint['body']}")
     state = core.daemon_state()
     if backend.available and not (state and state["alive"]):
-        print("\n! powerkeeper.service is not running; settings will not survive a reboot.")
+        print("\n! kernelthrottle.service is not running; settings will not survive a reboot.")
 
 
 def main(argv):
@@ -132,13 +132,13 @@ def main(argv):
                                                   "--fan-percent", rest[0].rstrip("%")))
     if command == "unlock" and len(rest) == 1:
         return subprocess.call(helper_command("unlock", rest[0]))
-    print("usage: powerkeeper [status]\n"
-          "       powerkeeper limit <20-100|off>\n"
-          "       powerkeeper full [on|off]       charge to 100% once, until unplugged\n"
-          "       powerkeeper calibrate <on|off>\n"
-          "       powerkeeper performance <on|off|ac>  maximum performance (ac: only plugged in)\n"
-          "       powerkeeper fan <auto|max|20-100>    fan control (a number: fixed speed in %)\n"
-          "       powerkeeper unlock <id>             turn on a maker's hidden driver features\n"
-          "       powerkeeper                     (no arguments in a desktop: open the app)",
+    print("usage: kernelthrottle [status]\n"
+          "       kernelthrottle limit <20-100|off>\n"
+          "       kernelthrottle full [on|off]       charge to 100% once, until unplugged\n"
+          "       kernelthrottle calibrate <on|off>\n"
+          "       kernelthrottle performance <on|off|ac>  maximum performance (ac: only plugged in)\n"
+          "       kernelthrottle fan <auto|max|20-100>    fan control (a number: fixed speed in %)\n"
+          "       kernelthrottle unlock <id>             turn on a maker's hidden driver features\n"
+          "       kernelthrottle                     (no arguments in a desktop: open the app)",
           file=sys.stderr)
     return 2

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from powerkeeper import core, tuning  # noqa: E402
+from kernelthrottle import core, tuning  # noqa: E402
 
 
 def make(root, rel, value):
@@ -325,7 +325,7 @@ class UnlockTests(Sysfs):
         tuning._run = run
         self.addCleanup(setattr, tuning, "_run", original)
         self.assertIsNone(tuning.apply_unlock("acer-predator"))
-        conf = core.read(os.path.join(self.root, "modprobe.d/powerkeeper-acer-predator.conf"))
+        conf = core.read(os.path.join(self.root, "modprobe.d/kernelthrottle-acer-predator.conf"))
         self.assertIn("options acer_wmi predator_v4=1", conf)
         self.assertEqual(calls, [["modprobe", "-r", "acer_wmi"], ["modprobe", "acer_wmi"]])
 

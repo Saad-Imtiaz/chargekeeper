@@ -1,6 +1,6 @@
 # Changelog
 
-Every change to Powerkeeper (called Chargekeeper until 2026-11-24), newest first. Commit IDs point to the full details (`git show ID`).
+Every change to KernelThrottle (called Chargekeeper until 2026-11-24, briefly Powerkeeper), newest first. Commit IDs point to the full details (`git show ID`).
 Rules learned from these changes are collected in [MAINTAINING.md](MAINTAINING.md#rules-learned-the-hard-way).
 
 ## How to add an entry
@@ -18,8 +18,15 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: Named KernelThrottle; the uninstaller removes everything
+- **Changed:** the name is KernelThrottle (`kernelthrottle`, `dev.kernelthrottle.KernelThrottle`,
+  icons `kt-*-symbolic`). "Powerkeeper" was never released; the entries below use the new name.
+- **Changed:** `uninstall.sh` removes KernelThrottle, Powerkeeper and Chargekeeper with all their
+  settings and history, per-user preferences, driver options and our NVIDIA service files. The
+  installer moves Chargekeeper's and Powerkeeper's settings and history over and removes their files.
+
 ### 2026-11-24: Version 1.2.0 shown at the bottom of the window
-- **Added:** "Powerkeeper 1.2.0" under every tab, so screenshots and bug reports show the version.
+- **Added:** "KernelThrottle 1.2.0" under every tab, so screenshots and bug reports show the version.
 - **Changed:** `VERSION` is 1.2.0 (the rename, performance and fan features).
 
 ### 2026-11-24: Explain fan speeds without fan control
@@ -29,9 +36,9 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
   fan speeds (`fan1_input`, `fan2_input`) but no `pwm` files: the driver only offers fan control
   on models it lists.
 
-### 2026-11-24: Chargekeeper is now Powerkeeper
-- **Changed:** the app, command, service, helper, app ID (`dev.powerkeeper.Powerkeeper`), paths
-  (`/usr/lib/powerkeeper`, `/etc/powerkeeper`, `/var/lib/powerkeeper`, `~/.config/powerkeeper`) and
+### 2026-11-24: Chargekeeper is now KernelThrottle
+- **Changed:** the app, command, service, helper, app ID (`dev.kernelthrottle.KernelThrottle`), paths
+  (`/usr/lib/kernelthrottle`, `/etc/kernelthrottle`, `/var/lib/kernelthrottle`, `~/.config/kernelthrottle`) and
   the Python package are renamed. Our icons are `pk-*-symbolic`.
 - **Migration:** installing over Chargekeeper stops and removes its service and files, moves
   `/etc/chargekeeper` and `/var/lib/chargekeeper` (settings, maker choice, history, health, usage)

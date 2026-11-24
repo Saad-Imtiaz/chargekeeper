@@ -116,7 +116,7 @@ LIVE_LIMIT_SECONDS = 300      # stop if the host never reports the menu closing
 # System monitor section: each row's submenu holds its top apps at row id + 1..3.
 ID_MON_HEADER, ID_MEASURING = 300, 301
 ID_CPU, ID_MEM, ID_DISK, ID_NET, ID_TEMPS, ID_OPEN_MONITOR = 310, 320, 330, 340, 350, 360
-TEMP_ICONS = {"cpu": "pk-cpu-symbolic", "battery": "battery-good-symbolic", "board": "pk-board-symbolic",
+TEMP_ICONS = {"cpu": "kt-cpu-symbolic", "battery": "battery-good-symbolic", "board": "kt-board-symbolic",
               "storage": "drive-harddisk-solidstate-symbolic", "gpu": "video-display-symbolic"}
 
 
@@ -429,7 +429,7 @@ class Tray:
         children = {0: order}
         self._monitor_section(add, children)
         add(ID_SEPARATORS[3], type="separator")
-        add(ID_OPEN, self.app.activate, label="Open Powerkeeper")
+        add(ID_OPEN, self.app.activate, label="Open KernelThrottle")
         add(ID_QUIT, self.app.quit, label="Quit")
         # Submenu rows were added in sequence; move them under their parent.
         for parent, kids in list(children.items()):
@@ -449,9 +449,9 @@ class Tray:
         else:
             mem_pct = 100 * r["mem_used"] / (r["mem_total"] or 1)
             rows = (
-                (ID_CPU, "pk-cpu-symbolic", f"Processor · {r['cpu_pct']:.0f}%",
+                (ID_CPU, "kt-cpu-symbolic", f"Processor · {r['cpu_pct']:.0f}%",
                  [(n, f"{v:.1f}%") for n, v in r["top_cpu"] if v >= 0.05]),
-                (ID_MEM, "pk-memory-symbolic", f"Memory · {fmt(r['mem_used'])} of {fmt(r['mem_total'])} ({mem_pct:.0f}%)",
+                (ID_MEM, "kt-memory-symbolic", f"Memory · {fmt(r['mem_used'])} of {fmt(r['mem_total'])} ({mem_pct:.0f}%)",
                  [(n, fmt(v)) for n, v in r["top_mem"]]),
                 (ID_DISK, "drive-harddisk-symbolic", f"Disk · {fmt(r['disk_read'] + r['disk_write'], rate=True)}",
                  [(n, fmt(v, rate=True)) for n, v in r["top_disk"]]),
@@ -478,11 +478,11 @@ class Tray:
             short = " · ".join(f"{title.replace('Motherboard', 'Board')} {value:.0f}°"
                                for kind, title, value in readings if kind in ("cpu", "battery", "board"))
             add(ID_TEMPS, label=menu_text(f"Temperatures · {short}" if short else "Temperatures"),
-                **{"icon-name": "pk-temperature-symbolic"})
+                **{"icon-name": "kt-temperature-symbolic"})
             kids = []
             for i, (kind, title, value, source) in enumerate(self.temps, start=1):
                 text = f"{title} · {value:.0f} °C" if value is not None else f"{title} · not reported"
-                add(ID_TEMPS + i, label=menu_text(text), **{"icon-name": TEMP_ICONS.get(kind, "pk-temperature-symbolic")})
+                add(ID_TEMPS + i, label=menu_text(text), **{"icon-name": TEMP_ICONS.get(kind, "kt-temperature-symbolic")})
                 kids.append(ID_TEMPS + i)
             children[ID_TEMPS] = kids
         add(ID_OPEN_MONITOR, lambda: self.app.show_page("monitor"), label="Open System Monitor…")
@@ -569,15 +569,15 @@ class Tray:
             }
         return {
             "Category": GLib.Variant("s", "Hardware"),
-            "Id": GLib.Variant("s", "powerkeeper"),
-            "Title": GLib.Variant("s", "Powerkeeper"),
+            "Id": GLib.Variant("s", "kernelthrottle"),
+            "Title": GLib.Variant("s", "KernelThrottle"),
             "Status": GLib.Variant("s", "Active"),
             "WindowId": GLib.Variant("i", 0),
             "IconName": GLib.Variant("s", self.icon),
             "IconThemePath": GLib.Variant("s", ""),
             "AttentionIconName": GLib.Variant("s", ""),
             "OverlayIconName": GLib.Variant("s", ""),
-            "ToolTip": GLib.Variant("(sa(iiay)ss)", (self.icon, [], "Powerkeeper", self.tooltip)),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", (self.icon, [], "KernelThrottle", self.tooltip)),
             "ItemIsMenu": GLib.Variant("b", True),
             "Menu": GLib.Variant("o", MENU_PATH),
             "XAyatanaLabel": GLib.Variant("s", self.label),

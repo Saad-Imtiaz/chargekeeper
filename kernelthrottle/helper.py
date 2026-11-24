@@ -261,7 +261,7 @@ def cmd_daemon(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="powerkeeper-helper")
+    parser = argparse.ArgumentParser(prog="kernelthrottle-helper")
     sub = parser.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("set", help="change settings and apply them")
@@ -295,7 +295,7 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
-        sys.exit("powerkeeper-helper must run as root")
+        sys.exit("kernelthrottle-helper must run as root")
     try:
         args.func(args)
     except OSError as exc:

@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from powerkeeper import tray  # noqa: E402
+from kernelthrottle import tray  # noqa: E402
 
 
 class FakeBackend:

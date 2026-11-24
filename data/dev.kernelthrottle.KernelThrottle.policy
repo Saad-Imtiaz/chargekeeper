@@ -2,16 +2,16 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>Powerkeeper</vendor>
-  <action id="dev.powerkeeper.Powerkeeper.helper">
+  <vendor>KernelThrottle</vendor>
+  <action id="dev.kernelthrottle.KernelThrottle.helper">
     <description>Change battery, performance and fan settings</description>
     <message>Authentication is required to change battery, performance and fan settings</message>
-    <icon_name>dev.powerkeeper.Powerkeeper</icon_name>
+    <icon_name>dev.kernelthrottle.KernelThrottle</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/powerkeeper/powerkeeper-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/kernelthrottle/kernelthrottle-helper</annotate>
   </action>
 </policyconfig>

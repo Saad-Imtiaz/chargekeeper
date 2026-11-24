@@ -1,7 +1,7 @@
-# Powerkeeper
+# KernelThrottle
 
 Battery charge limits, maximum performance, fan control, battery health, usage history and a live
-system monitor for Linux laptops. Powerkeeper stops charging at a level you choose so the battery
+system monitor for Linux laptops. KernelThrottle stops charging at a level you choose so the battery
 lasts longer, unlocks your laptop's full power when you want it, and shows what is using your battery.
 It was called Chargekeeper until version 1.2; installing it over Chargekeeper keeps your settings. It is a GTK 4 / libadwaita app with a tray
 icon, a small background service and a command-line tool.
@@ -77,7 +77,7 @@ charge to full once, and see the system monitor with the top apps in each catego
 - **Fan control**: automatic, full speed, or a fixed speed, with live fan speeds. A fixed speed goes
   back to automatic if the processor reaches 90 °C.
 - **Hidden controls switched on**: some makers' controls are in Linux but turned off for many
-  models (Acer Predator Turbo and fans, ThinkPad fan control). Powerkeeper offers to turn them on.
+  models (Acer Predator Turbo and fans, ThinkPad fan control). KernelThrottle offers to turn them on.
 
 **Everything else**
 - Tray icon with a quick menu; it starts at login if you turn it on.
@@ -89,7 +89,7 @@ charge to full once, and see the system monitor with the top apps in each catego
 
 ## Supported laptops
 
-Powerkeeper uses the charge-control interface the Linux kernel exposes for your laptop. Which one
+KernelThrottle uses the charge-control interface the Linux kernel exposes for your laptop. Which one
 you get depends on the maker and model:
 
 | Laptops | Kernel interface | What you can set |
@@ -109,14 +109,14 @@ is never charged past what you asked for. Known firmware rules are applied autom
 |---|---|
 | Dell | limit 55–100%, resume level 50–95%, limit at least 5% above the resume level |
 | LG gram, Toshiba/Dynabook | only 80% or 100% are accepted, so the limit is 80% |
-| MSI | the resume level is always 10% below the limit; Powerkeeper only sets the limit |
+| MSI | the resume level is always 10% below the limit; KernelThrottle only sets the limit |
 | Lenovo IdeaPad/Legion | conservation mode holds 60–80%, depending on the model |
 | ASUS | the kernel accepts any value, but some models only honour 60%, 80% or 100% |
 
 The reference laptop is an Acer Predator PH315-55. Other makers' firmware rules are checked by tests
 that emulate the kernel, so reports from other laptops are very welcome.
 
-To see what your laptop supports, install Powerkeeper and run `powerkeeper status`, or open the
+To see what your laptop supports, install KernelThrottle and run `kernelthrottle status`, or open the
 Charging tab. The first row names the interface it found.
 
 ## Install
@@ -161,7 +161,7 @@ Charging tab. The first row names the interface it found.
    `--microsoft`, `--msi`, `--razer`, `--samsung`, `--sony`, `--system76`, `--toshiba` and `--other`
    work the same way (`./install.sh --help` lists them). The installer tells you what to expect from
    that maker, installs any missing dependencies with apt, dnf, pacman or zypper, copies the app to
-   `/usr/lib/powerkeeper`, and starts the background service. On a first install it sets an 85%
+   `/usr/lib/kernelthrottle`, and starts the background service. On a first install it sets an 85%
    limit (rounded down to what your laptop supports, for example 80% on Acer).
 
    **Acer laptops** need an extra driver, so choosing Acer also builds
@@ -171,7 +171,7 @@ Charging tab. The first row names the interface it found.
    for a one-time password and must confirm the key (MOK) on the next reboot. Other distributions
    need their own module-signing setup. Run from a script without a terminal, the installer never
    builds the driver unless you pass `--acer`.
-3. Open **Powerkeeper** from the app menu, or run `powerkeeper`.
+3. Open **KernelThrottle** from the app menu, or run `kernelthrottle`.
 
 To update, download the new version and run `sudo ./install.sh` again. Your settings are kept, and
 the menu starts on the maker you chose last time.
@@ -204,11 +204,11 @@ The line under it lists what it changes on your laptop. Leave **Only while plugg
 the usual settings on battery; most laptops hold the graphics chip at a low limit on battery anyway.
 On an Acer Predator or a ThinkPad you may first see an offer to turn the hidden controls on: press
 **Turn on** (the driver reloads; if it's busy, restart the laptop). From a terminal:
-`powerkeeper performance on`, `off` or `ac`.
+`kernelthrottle performance on`, `off` or `ac`.
 
 **Set the fans.** On the same tab, **Fan control** offers what your laptop supports: **Automatic**
 (the firmware decides), **Full speed**, or **Fixed speed** with a percentage. From a terminal:
-`powerkeeper fan auto`, `max` or a number such as `powerkeeper fan 60`.
+`kernelthrottle fan auto`, `max` or a number such as `kernelthrottle fan 60`.
 
 **Change how fast the Monitor updates.** The button at the top right of the **Monitor** tab sets the
 update speed (every 0.5, 1, 2 or 5 seconds) and switches **Smooth animation** on or off. With it on,
@@ -217,14 +217,14 @@ time to do that. Processor, memory, disk and network totals follow the speed you
 stay at every 2 seconds at most, temperatures likewise, and per-app network at every 6 seconds,
 because they cost more to read and hardly change faster. The Power section follows the battery,
 which firmware refreshes on its own schedule. If you've turned animations off for your whole desktop,
-Powerkeeper doesn't animate either.
+KernelThrottle doesn't animate either.
 
 ![The update speed menu on the Monitor tab](docs/screenshots/monitor-speed.png)
 
 **Command line.**
 
 ```
-$ powerkeeper status
+$ kernelthrottle status
 Battery     BAT1  100%  Full
 Adapter     plugged in
 Charger     ≈ 25 W  (estimate: no charger sensor)
@@ -236,26 +236,26 @@ Temperature 23.9 °C
 Control     Acer battery health mode
 Limit       80%
 
-$ powerkeeper limit 85        # set the limit (or: off)
-$ powerkeeper full            # charge to 100% once
-$ powerkeeper calibrate on    # Acer only
+$ kernelthrottle limit 85        # set the limit (or: off)
+$ kernelthrottle full            # charge to 100% once
+$ kernelthrottle calibrate on    # Acer only
 ```
 
-Running `powerkeeper` with no arguments opens the app; in a terminal without a display it prints
+Running `kernelthrottle` with no arguments opens the app; in a terminal without a display it prints
 the status.
 
 ## How it works
 
 ```
- You (GTK app, tray, CLI)  ──pkexec──▶  powerkeeper-helper (root)  ──▶  firmware via /sys
+ You (GTK app, tray, CLI)  ──pkexec──▶  kernelthrottle-helper (root)  ──▶  firmware via /sys
          │                                         ▲
          │ reads /sys and /proc                    │ same program, run by systemd
          ▼                                         │
-  live readings, monitor              powerkeeper.service: re-applies the limit,
+  live readings, monitor              kernelthrottle.service: re-applies the limit,
                                       enforces the software limit, logs history
 ```
 
-- The **app runs as your user** and only reads. Every change goes through `powerkeeper-helper`,
+- The **app runs as your user** and only reads. Every change goes through `kernelthrottle-helper`,
   which runs as root through polkit and accepts only checked values: percentages in range and
   choices the firmware itself lists.
 - The **background service** re-applies your settings after boot, resume and charger changes (some
@@ -266,7 +266,7 @@ the status.
 
 The battery reports its own power, so "from battery" and "into battery" are measurements. Chargers
 are different: most laptops only tell Linux whether one is connected, and on USB-C the kernel's
-voltage and current are the negotiated contract, not what's flowing. Powerkeeper shows:
+voltage and current are the negotiated contract, not what's flowing. KernelThrottle shows:
 
 - **A measured figure** when the charger really has a sensor.
 - **≈ (an estimate)** otherwise: your typical draw on battery (the median over the last week) plus
@@ -277,7 +277,7 @@ voltage and current are the negotiated contract, not what's flowing. Powerkeeper
 
 ### Live readings without wasting battery
 
-Measuring the battery shouldn't drain it. Powerkeeper keeps readings current like this:
+Measuring the battery shouldn't drain it. KernelThrottle keeps readings current like this:
 
 1. **Kernel events.** Battery and charger drivers announce changes (charger plugged in or out,
    charging started or stopped, and on most laptops every 1% step). The app and the service listen
@@ -325,7 +325,7 @@ Memory stays flat over time: the 10-minute run, 600 tray-menu openings, 40 windo
 
 ## Safety and precautions
 
-Powerkeeper is designed so that a mistake or a crash leaves your laptop charging normally:
+KernelThrottle is designed so that a mistake or a crash leaves your laptop charging normally:
 
 - **Rounding is always down.** You're never charged above the limit you chose.
 - **"Pause charging" and "Run on battery while plugged in" switch off by themselves** when the battery
@@ -341,13 +341,13 @@ Powerkeeper is designed so that a mistake or a crash leaves your laptop charging
 - **Administrators at the laptop change settings without a password.** Other users are asked for
   an administrator password (polkit).
 - **Nothing leaves your computer.** No network access, no telemetry. History stays in
-  `/var/lib/powerkeeper`.
+  `/var/lib/kernelthrottle`.
 
 Precautions:
 
 - **Use one charge-limit tool at a time.** TLP's `START/STOP_CHARGE_THRESH`, GNOME's **Preserve
   Battery Health** (GNOME 48+), KDE's **Battery charge limit**, and vendor tools all write the same
-  firmware setting and will fight. Powerkeeper warns about TLP; switch the others off yourself.
+  firmware setting and will fight. KernelThrottle warns about TLP; switch the others off yourself.
 - **A limit isn't instant if the battery is already above it.** The laptop stops charging and the
   battery drains to the limit through normal use. It doesn't discharge on purpose while plugged
   in.
@@ -356,17 +356,17 @@ Precautions:
 - **The Acer driver is third-party** (built from source at a pinned version). The installer only
   builds it when you choose Acer.
 - The settings on the Performance tab change performance and fan behaviour, not charging. TLP may
-  change some of them when you plug in or unplug; Powerkeeper's service puts maximum performance
+  change some of them when you plug in or unplug; KernelThrottle's service puts maximum performance
   back within a minute.
 - **Maximum performance makes the laptop hotter and louder** and uses more power. The firmware's
-  own temperature protection stays in charge; Powerkeeper never raises temperature limits.
+  own temperature protection stays in charge; KernelThrottle never raises temperature limits.
 - **A fixed fan speed** has a 20% floor, returns to automatic at 90 °C, and goes back to automatic
-  when the service stops or Powerkeeper is uninstalled.
+  when the service stops or KernelThrottle is uninstalled.
 
 ## What doesn't work
 
 - **Laptops without a kernel charge-control interface** can't limit charging: most HP models,
-  Microsoft Surface, Razer, Gigabyte, and some budget brands. Powerkeeper detects this and offers
+  Microsoft Surface, Razer, Gigabyte, and some budget brands. KernelThrottle detects this and offers
   an unplug reminder instead. Support depends on the kernel, so a newer kernel may add your model.
 - **Desktop computers** have no battery. The Monitor tab still works.
 - **Per-app disk use** covers only your own apps; Linux keeps other users' and system services'
@@ -387,13 +387,13 @@ Precautions:
 
 | Problem | What to do |
 |---|---|
-| Banner: "Background service is not running" | `sudo systemctl enable --now powerkeeper`, or run `sudo ./install.sh` again. |
+| Banner: "Background service is not running" | `sudo systemctl enable --now kernelthrottle`, or run `sudo ./install.sh` again. |
 | "The firmware does not accept 85%" | Your model only takes certain values. Choose 80%. |
 | The limit resets after a reboot | Make sure the service is running (above), and that TLP or another tool isn't setting thresholds. |
 | No tray icon on GNOME | Settings tab → **Enable** next to the warning, or turn on the AppIndicator extension. |
 | Acer: "battery driver not installed" | `sudo ./install.sh --acer`. With Secure Boot, complete the MOK enrollment at the next boot. |
 | Charging stopped at a strange level on MSI | Update; MSI's resume level is now handled correctly. |
-| Anything else | Settings tab → Diagnostics → copy button, and include the report in a bug report. Service log: `journalctl -u powerkeeper`. |
+| Anything else | Settings tab → Diagnostics → copy button, and include the report in a bug report. Service log: `journalctl -u kernelthrottle`. |
 
 ## Uninstall
 
@@ -402,20 +402,22 @@ sudo ./uninstall.sh          # keeps the Acer driver
 sudo ./uninstall.sh --acer   # also removes the Acer driver
 ```
 
-Uninstalling switches the limit off, so the battery charges to 100% again, and sets charging back
-to normal. Your notification preferences stay in `~/.config/powerkeeper`; delete that folder too if
-you want.
+Uninstalling switches the limit off, so the battery charges to 100% again, sets charging back to
+normal, and gives the fans and performance settings back to the firmware. It removes everything:
+settings, history, your preferences in `~/.config`, driver options written by **Turn on** (they end
+at the next restart) and the NVIDIA Dynamic Boost service if the installer added it. It also removes
+earlier versions under their old names, Chargekeeper and Powerkeeper.
 
 ## Files
 
 | Path | What |
 |---|---|
-| `/usr/lib/powerkeeper/` | the app and `powerkeeper-helper` |
-| `/etc/powerkeeper/config.json` | limit settings (system-wide) |
-| `/etc/powerkeeper/maker` | the maker chosen in the installer, its default next time |
-| `/var/lib/powerkeeper/` | history, health and app usage logs |
-| `/run/powerkeeper/state.json` | service status, read by the app |
-| `~/.config/powerkeeper/prefs.json` | notification, tray and Monitor preferences (per user) |
+| `/usr/lib/kernelthrottle/` | the app and `kernelthrottle-helper` |
+| `/etc/kernelthrottle/config.json` | limit settings (system-wide) |
+| `/etc/kernelthrottle/maker` | the maker chosen in the installer, its default next time |
+| `/var/lib/kernelthrottle/` | history, health and app usage logs |
+| `/run/kernelthrottle/state.json` | service status, read by the app |
+| `~/.config/kernelthrottle/prefs.json` | notification, tray and Monitor preferences (per user) |
 | `/usr/share/polkit-1/` | permission policy and rule |
 
 ## Development

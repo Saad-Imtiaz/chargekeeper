@@ -1,7 +1,7 @@
 """Battery discovery and charge-control backends.
 
 Everything here that only reads sysfs is safe to call as a normal user (GUI,
-CLI). The write paths are reached only through powerkeeper-helper, which
+CLI). The write paths are reached only through kernelthrottle-helper, which
 runs as root via pkexec or the systemd service.
 """
 
@@ -13,12 +13,12 @@ import statistics
 import time
 
 POWER_SUPPLY = "/sys/class/power_supply"
-CONFIG_PATH = "/etc/powerkeeper/config.json"
-DATA_DIR = "/var/lib/powerkeeper"
+CONFIG_PATH = "/etc/kernelthrottle/config.json"
+DATA_DIR = "/var/lib/kernelthrottle"
 HISTORY_PATH = DATA_DIR + "/history.csv"
 HEALTH_PATH = DATA_DIR + "/health.csv"
 USAGE_PATH = DATA_DIR + "/usage.json"
-STATE_PATH = "/run/powerkeeper/state.json"
+STATE_PATH = "/run/kernelthrottle/state.json"
 
 ACER_DRIVER = "/sys/bus/wmi/drivers/acer-wmi-battery"
 ACER_WMI_DEVICE = "/sys/bus/wmi/devices/79772EC5-04B1-4BFD-843C-61E7F77B6CC9"
@@ -707,7 +707,7 @@ def hints():
             out.append({
                 "id": "tlp-thresholds",
                 "title": "TLP also sets charge thresholds",
-                "body": f"{path} sets START/STOP_CHARGE_THRESH and will fight with Powerkeeper. "
+                "body": f"{path} sets START/STOP_CHARGE_THRESH and will fight with KernelThrottle. "
                         "Comment those lines out.",
             })
             break

@@ -1,18 +1,18 @@
 [Unit]
-Description=Powerkeeper battery charge limit service
+Description=KernelThrottle battery charge limit service
 After=systemd-modules-load.service
 
 [Service]
 Type=simple
-ExecStart=/usr/lib/powerkeeper/powerkeeper-helper daemon
+ExecStart=/usr/lib/kernelthrottle/kernelthrottle-helper daemon
 # If the service stops or crashes, never leave charging paused with nobody to resume it.
-ExecStopPost=/usr/lib/powerkeeper/powerkeeper-helper release
+ExecStopPost=/usr/lib/kernelthrottle/kernelthrottle-helper release
 Restart=on-failure
 RestartSec=5
-RuntimeDirectory=powerkeeper
+RuntimeDirectory=kernelthrottle
 RuntimeDirectoryPreserve=yes
-StateDirectory=powerkeeper
-ConfigurationDirectory=powerkeeper
+StateDirectory=kernelthrottle
+ConfigurationDirectory=kernelthrottle
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes

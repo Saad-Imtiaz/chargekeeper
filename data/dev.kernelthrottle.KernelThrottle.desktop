@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Powerkeeper
+Name=KernelThrottle
 GenericName=Battery Manager
 Comment=Limit battery charging and track battery health
-Exec=powerkeeper
-Icon=dev.powerkeeper.Powerkeeper
+Exec=kernelthrottle
+Icon=dev.kernelthrottle.KernelThrottle
 Terminal=false
 Categories=Settings;HardwareSettings;GTK;
 Keywords=battery;charge;limit;health;power;threshold;

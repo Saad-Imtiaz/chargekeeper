@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install Powerkeeper system-wide.
+# Install KernelThrottle system-wide.
 #   sudo ./install.sh           ask for the laptop's maker in a menu, then install or update
 #   sudo ./install.sh --acer    the same without asking (any maker: see --help)
 set -euo pipefail
@@ -28,12 +28,12 @@ MAKERS=(
     "sony|Sony VAIO|Battery care limiter: 50%, 80% or 100%."
     "system76|System76|Any limit, with a resume level where the firmware has one."
     "toshiba|Toshiba / Dynabook|The limit is 80% or off: the firmware accepts nothing else."
-    "other|Other or not sure|Powerkeeper finds out what your firmware supports by itself."
+    "other|Other or not sure|KernelThrottle finds out what your firmware supports by itself."
 )
 
 usage() {
     cat <<EOF
-Install or update Powerkeeper.
+Install or update KernelThrottle.
 
   sudo ./install.sh             pick your laptop's maker from a menu
   sudo ./install.sh --MAKER     no menu, where MAKER is one of:
@@ -167,10 +167,10 @@ while [ $# -gt 0 ]; do
 done
 
 VENDOR_FILE=/sys/class/dmi/id/sys_vendor
-SAVED_MAKER=/etc/powerkeeper/maker
+SAVED_MAKER=/etc/kernelthrottle/maker
 if [ "$DRY_RUN" -eq 1 ]; then       # tests only; a real install never reads these
-    VENDOR_FILE="${POWERKEEPER_TEST_VENDOR_FILE:-$VENDOR_FILE}"
-    SAVED_MAKER="${POWERKEEPER_TEST_SAVED_MAKER:-$SAVED_MAKER}"
+    VENDOR_FILE="${KERNELTHROTTLE_TEST_VENDOR_FILE:-$VENDOR_FILE}"
+    SAVED_MAKER="${KERNELTHROTTLE_TEST_SAVED_MAKER:-$SAVED_MAKER}"
 elif [ "$(id -u)" -ne 0 ]; then
     echo "Run with sudo: sudo $0${MAKER:+ --$MAKER}" >&2
     exit 1
@@ -225,56 +225,58 @@ if [ ${#missing[@]} -gt 0 ]; then
     fi
 fi
 
-# Powerkeeper was called Chargekeeper until version 1.2. Move its settings and history over and
-# remove its files; the battery limit stays as it is (the new service takes over at once).
-if [ -d /usr/lib/chargekeeper ] || [ -f /etc/systemd/system/chargekeeper.service ]; then
-    echo "==> Moving Chargekeeper's settings and history to Powerkeeper"
-    systemctl disable --now chargekeeper.service 2>/dev/null || true
+# KernelThrottle was called Chargekeeper (1.1) and briefly Powerkeeper. Move their settings and
+# history over and remove their files; the battery limit stays as it is.
+for entry in "chargekeeper|dev.chargekeeper.Chargekeeper|ck" "powerkeeper|dev.powerkeeper.Powerkeeper|pk"; do
+    IFS="|" read -r old old_id old_icon <<< "$entry"
+    [ -d "/usr/lib/$old" ] || [ -f "/etc/systemd/system/$old.service" ] || [ -d "/etc/$old" ] || continue
+    echo "==> Moving $old's settings and history to KernelThrottle"
+    systemctl disable --now "$old.service" 2>/dev/null || true
     for dir in /etc /var/lib; do
-        if [ -d "$dir/chargekeeper" ]; then
-            install -d "$dir/powerkeeper"
-            cp -an "$dir/chargekeeper/." "$dir/powerkeeper/"
-            rm -rf "$dir/chargekeeper"
+        if [ -d "$dir/$old" ]; then
+            install -d "$dir/kernelthrottle"
+            cp -an "$dir/$old/." "$dir/kernelthrottle/"
+            rm -rf "${dir:?}/$old"
         fi
     done
-    for conf in /etc/modprobe.d/chargekeeper-*.conf; do
-        [ -e "$conf" ] && mv "$conf" "${conf/chargekeeper-/powerkeeper-}"
+    for conf in /etc/modprobe.d/"$old"-*.conf; do
+        [ -e "$conf" ] && mv "$conf" "${conf/$old-/kernelthrottle-}"
     done
-    if [ -f /usr/share/dbus-1/system.d/chargekeeper-nvidia-dbus.conf ]; then
-        mv /usr/share/dbus-1/system.d/chargekeeper-nvidia-dbus.conf \
-            /usr/share/dbus-1/system.d/powerkeeper-nvidia-dbus.conf
+    if [ -f "/usr/share/dbus-1/system.d/$old-nvidia-dbus.conf" ]; then
+        mv "/usr/share/dbus-1/system.d/$old-nvidia-dbus.conf" \
+            /usr/share/dbus-1/system.d/kernelthrottle-nvidia-dbus.conf
     fi
-    rm -rf /usr/lib/chargekeeper /run/chargekeeper
-    rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
-        /usr/lib/systemd/system-sleep/chargekeeper \
-        /usr/share/polkit-1/actions/dev.chargekeeper.Chargekeeper.policy \
-        /usr/share/polkit-1/rules.d/50-dev.chargekeeper.Chargekeeper.rules \
-        /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop \
-        /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg \
-        /usr/share/icons/hicolor/symbolic/apps/ck-{cpu,memory,temperature,board,fan}-symbolic.svg
+    rm -rf "/usr/lib/$old" "/run/$old"
+    rm -f "/usr/bin/$old" "/etc/systemd/system/$old.service" \
+        "/usr/lib/systemd/system-sleep/$old" \
+        "/usr/share/polkit-1/actions/$old_id.policy" \
+        "/usr/share/polkit-1/rules.d/50-$old_id.rules" \
+        "/usr/share/applications/$old_id.desktop" \
+        "/usr/share/icons/hicolor/scalable/apps/$old_id.svg" \
+        /usr/share/icons/hicolor/symbolic/apps/"$old_icon"-{cpu,memory,temperature,board,fan}-symbolic.svg
     if [ -n "${SUDO_USER:-}" ]; then
         home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-        rm -f "$home/.config/autostart/dev.chargekeeper.Chargekeeper.desktop"
+        rm -f "$home/.config/autostart/$old_id.desktop"
     fi
     MIGRATED=1
-fi
+done
 
 echo "==> Installing files"
-install -d /usr/lib/powerkeeper/powerkeeper
-rm -f /usr/lib/powerkeeper/powerkeeper/*.py
-install -m 644 "$SRC"/powerkeeper/*.py /usr/lib/powerkeeper/powerkeeper/
-install -m 755 "$SRC/bin/powerkeeper-helper" /usr/lib/powerkeeper/powerkeeper-helper
-install -m 755 "$SRC/bin/powerkeeper" /usr/bin/powerkeeper
-install -Dm 644 "$SRC/data/dev.powerkeeper.Powerkeeper.policy" \
-    /usr/share/polkit-1/actions/dev.powerkeeper.Powerkeeper.policy
-install -Dm 644 "$SRC/data/dev.powerkeeper.Powerkeeper.rules" \
-    /usr/share/polkit-1/rules.d/50-dev.powerkeeper.Powerkeeper.rules
-install -Dm 644 "$SRC/data/powerkeeper.service" /etc/systemd/system/powerkeeper.service
-install -Dm 755 "$SRC/data/powerkeeper-resume" /usr/lib/systemd/system-sleep/powerkeeper
-install -Dm 644 "$SRC/data/dev.powerkeeper.Powerkeeper.desktop" \
-    /usr/share/applications/dev.powerkeeper.Powerkeeper.desktop
-install -Dm 644 "$SRC/data/dev.powerkeeper.Powerkeeper.svg" \
-    /usr/share/icons/hicolor/scalable/apps/dev.powerkeeper.Powerkeeper.svg
+install -d /usr/lib/kernelthrottle/kernelthrottle
+rm -f /usr/lib/kernelthrottle/kernelthrottle/*.py
+install -m 644 "$SRC"/kernelthrottle/*.py /usr/lib/kernelthrottle/kernelthrottle/
+install -m 755 "$SRC/bin/kernelthrottle-helper" /usr/lib/kernelthrottle/kernelthrottle-helper
+install -m 755 "$SRC/bin/kernelthrottle" /usr/bin/kernelthrottle
+install -Dm 644 "$SRC/data/dev.kernelthrottle.KernelThrottle.policy" \
+    /usr/share/polkit-1/actions/dev.kernelthrottle.KernelThrottle.policy
+install -Dm 644 "$SRC/data/dev.kernelthrottle.KernelThrottle.rules" \
+    /usr/share/polkit-1/rules.d/50-dev.kernelthrottle.KernelThrottle.rules
+install -Dm 644 "$SRC/data/kernelthrottle.service" /etc/systemd/system/kernelthrottle.service
+install -Dm 755 "$SRC/data/kernelthrottle-resume" /usr/lib/systemd/system-sleep/kernelthrottle
+install -Dm 644 "$SRC/data/dev.kernelthrottle.KernelThrottle.desktop" \
+    /usr/share/applications/dev.kernelthrottle.KernelThrottle.desktop
+install -Dm 644 "$SRC/data/dev.kernelthrottle.KernelThrottle.svg" \
+    /usr/share/icons/hicolor/scalable/apps/dev.kernelthrottle.KernelThrottle.svg
 install -Dm 644 -t /usr/share/icons/hicolor/symbolic/apps "$SRC"/data/icons/hicolor/symbolic/apps/*.svg
 gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database -q /usr/share/applications 2>/dev/null || true
@@ -285,8 +287,8 @@ update-desktop-database -q /usr/share/applications 2>/dev/null || true
 if [ -x /usr/bin/nvidia-powerd ] && ! systemctl cat nvidia-powerd.service >/dev/null 2>&1; then
     echo "==> Adding the NVIDIA Dynamic Boost service (nvidia-powerd)"
     install -Dm 644 "$SRC/data/nvidia-powerd.service" /etc/systemd/system/nvidia-powerd.service
-    install -Dm 644 "$SRC/data/powerkeeper-nvidia-dbus.conf" \
-        /usr/share/dbus-1/system.d/powerkeeper-nvidia-dbus.conf
+    install -Dm 644 "$SRC/data/kernelthrottle-nvidia-dbus.conf" \
+        /usr/share/dbus-1/system.d/kernelthrottle-nvidia-dbus.conf
 fi
 
 # Runs in a subshell with its own "set -e", so a failure here doesn't stop the service
@@ -303,7 +305,7 @@ build_acer_driver() {
     [ -d "/lib/modules/$(uname -r)/build" ] || { echo "Install the kernel headers for $(uname -r) first" >&2; return 1; }
     dest="/usr/src/acer-wmi-battery-$ACER_VERSION"
     # An update shouldn't rebuild (and, with Secure Boot, re-sign) a driver that's already right.
-    if [ "$(cat "$dest/.powerkeeper-commit" 2>/dev/null)" = "$ACER_COMMIT" ] \
+    if [ "$(cat "$dest/.kernelthrottle-commit" 2>/dev/null)" = "$ACER_COMMIT" ] \
         && dkms status -m acer-wmi-battery -v "$ACER_VERSION" -k "$(uname -r)" | grep -q installed; then
         echo "    Already built for this kernel."
     else
@@ -325,7 +327,7 @@ CLEAN="make -C \${kernel_source_dir} M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE
 AUTOINSTALL="yes"
 EOF
         dkms install -m acer-wmi-battery -v "$ACER_VERSION"
-        echo "$ACER_COMMIT" > "$dest/.powerkeeper-commit"
+        echo "$ACER_COMMIT" > "$dest/.kernelthrottle-commit"
     fi
     echo acer-wmi-battery > /etc/modules-load.d/acer-wmi-battery.conf
     modprobe acer-wmi-battery
@@ -339,10 +341,10 @@ if [ "$WANT_ACER" -eq 1 ]; then
     set -e
 fi
 
-install -d /etc/powerkeeper
+install -d /etc/kernelthrottle
 echo "$MAKER" > "$SAVED_MAKER"     # the menu's default next time
-if [ ! -f /etc/powerkeeper/config.json ]; then
-    cat > /etc/powerkeeper/config.json <<'EOF'
+if [ ! -f /etc/kernelthrottle/config.json ]; then
+    cat > /etc/kernelthrottle/config.json <<'EOF'
 {
   "limit_enabled": true,
   "end": 85,
@@ -358,23 +360,23 @@ fi
 
 echo "==> Starting service"
 systemctl daemon-reload
-systemctl enable powerkeeper.service >/dev/null
-systemctl restart powerkeeper.service
+systemctl enable kernelthrottle.service >/dev/null
+systemctl restart kernelthrottle.service
 sleep 2
 
 echo
-/usr/bin/powerkeeper status || true
+/usr/bin/kernelthrottle status || true
 echo
 if [ "$DRIVER_FAILED" -ne 0 ]; then
     cat >&2 <<EOF
-Powerkeeper is installed, but the Acer driver isn't working yet, so the charge limit can't be set.
+KernelThrottle is installed, but the Acer driver isn't working yet, so the charge limit can't be set.
 - Secure Boot on: if you were asked for a password, reboot and enroll the key (MOK), then it loads.
 - Otherwise read the messages above, fix what they name and run: sudo ./install.sh --acer
 EOF
     exit 1
 fi
 if [ "${MIGRATED:-0}" -eq 1 ]; then
-    echo "Chargekeeper is now Powerkeeper. Quit Chargekeeper's tray icon if it still shows (or log"
+    echo "Chargekeeper is now KernelThrottle. Quit the old tray icon if it still shows (or log"
     echo "out and in); your settings, history and tray choice carry over."
 fi
-echo "Done. Open Powerkeeper from the app menu, or run 'powerkeeper'."
+echo "Done. Open KernelThrottle from the app menu, or run 'kernelthrottle'."

@@ -7,9 +7,9 @@
 # margin around the window is trimmed.
 set -eu
 TOOLS="$(cd "$(dirname "$0")" && pwd)"
-geometry=$(xwininfo -display :9 -root -tree | grep '"Powerkeeper"' | head -1 \
+geometry=$(xwininfo -display :9 -root -tree | grep '"KernelThrottle"' | head -1 \
     | grep -oE '[0-9]+x[0-9]+\+[0-9]+\+[0-9]+' | head -1)
-[ -n "$geometry" ] || { echo "No Powerkeeper window on :9" >&2; exit 1; }
+[ -n "$geometry" ] || { echo "No KernelThrottle window on :9" >&2; exit 1; }
 w=${geometry%%x*}; rest=${geometry#*x}; h=${rest%%+*}; rest=${rest#*+}; x=${rest%%+*}; y=${rest#*+}
 dump=$(mktemp --suffix=.xwd)
 xwd -root -display :9 -silent > "$dump"
