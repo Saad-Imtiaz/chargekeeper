@@ -18,6 +18,14 @@ When releasing, rename **Unreleased** to the version and date (see MAINTAINING.m
 
 ## Unreleased (since 1.1.0)
 
+### 2026-11-24: NVIDIA Dynamic Boost service where the driver package has none
+- **Added:** the installer adds an `nvidia-powerd` service and its D-Bus policy when the binary is
+  installed without them (Ubuntu ships the unit only under `/usr/share/doc`). It isn't enabled at
+  boot; the service starts it while maximum performance is on. The uninstaller removes it again,
+  along with the driver options written by "Turn on" and the fan icon.
+- **Why:** Dynamic Boost moves spare CPU power to the graphics chip; without the service the RTX
+  3060 on the reference laptop stays at its base limit.
+
 ### 2026-11-24: Performance tab
 - **Added:** a Performance tab with the maximum performance switch, "Only while plugged in", the
   power mode, firmware profile and CPU energy preference (moved from Settings), fan control

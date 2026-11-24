@@ -245,6 +245,16 @@ install -Dm 644 -t /usr/share/icons/hicolor/symbolic/apps "$SRC"/data/icons/hico
 gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database -q /usr/share/applications 2>/dev/null || true
 
+# NVIDIA Dynamic Boost: some distributions (Ubuntu) ship nvidia-powerd without its service
+# and D-Bus policy. Add ours, not enabled at boot: the service starts it only while
+# maximum performance is on.
+if [ -x /usr/bin/nvidia-powerd ] && ! systemctl cat nvidia-powerd.service >/dev/null 2>&1; then
+    echo "==> Adding the NVIDIA Dynamic Boost service (nvidia-powerd)"
+    install -Dm 644 "$SRC/data/nvidia-powerd.service" /etc/systemd/system/nvidia-powerd.service
+    install -Dm 644 "$SRC/data/chargekeeper-nvidia-dbus.conf" \
+        /usr/share/dbus-1/system.d/chargekeeper-nvidia-dbus.conf
+fi
+
 # Runs in a subshell with its own "set -e", so a failure here doesn't stop the service
 # from being started: the app still works without charge control, and says what's missing.
 build_acer_driver() {

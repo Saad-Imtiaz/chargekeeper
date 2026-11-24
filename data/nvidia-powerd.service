@@ -1,0 +1,9 @@
+# NVIDIA Dynamic Boost, added by Chargekeeper where the driver package has no service.
+# Not enabled at boot: Chargekeeper starts it while maximum performance is on.
+[Unit]
+Description=NVIDIA Dynamic Boost (nvidia-powerd)
+
+[Service]
+Type=dbus
+BusName=nvidia.powerd.server
+ExecStart=/usr/bin/nvidia-powerd

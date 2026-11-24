@@ -19,7 +19,13 @@ rm -f /usr/bin/chargekeeper /etc/systemd/system/chargekeeper.service \
     /usr/share/polkit-1/rules.d/50-dev.chargekeeper.Chargekeeper.rules \
     /usr/share/applications/dev.chargekeeper.Chargekeeper.desktop \
     /usr/share/icons/hicolor/scalable/apps/dev.chargekeeper.Chargekeeper.svg \
-    /usr/share/icons/hicolor/symbolic/apps/ck-{cpu,memory,temperature,board}-symbolic.svg
+    /usr/share/icons/hicolor/symbolic/apps/ck-{cpu,memory,temperature,board,fan}-symbolic.svg \
+    /etc/modprobe.d/chargekeeper-*.conf
+# Only the NVIDIA Dynamic Boost service this installer added (it carries our D-Bus policy).
+if [ -f /usr/share/dbus-1/system.d/chargekeeper-nvidia-dbus.conf ]; then
+    systemctl stop nvidia-powerd.service 2>/dev/null
+    rm -f /etc/systemd/system/nvidia-powerd.service /usr/share/dbus-1/system.d/chargekeeper-nvidia-dbus.conf
+fi
 systemctl daemon-reload
 
 if [ -n "${SUDO_USER:-}" ]; then
